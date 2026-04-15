@@ -83,11 +83,64 @@ hatch run docs:build
 
 ## Usage
 
-...
+```python
+from dartfx.ckan import CKANServer
+
+server = CKANServer("https://demo.ckan.org")
+
+# Server metadata
+print(server.info.ckan_version)
+print(server.info.site_title)
+
+# Server statistics
+print(server.stats.dataset_count)
+print(server.stats.organization_count)
+
+# Catalog browsing and search
+datasets = server.list_datasets(limit=5)
+search_results = server.search_datasets("water", limit=5)
+dataset = server.get_dataset("sample-dataset")
+organizations = server.list_organizations(limit=5)
+
+# CKAN Ecosystem synchronization and querying
+from dartfx.ckan.ecosystem import EcosystemManager
+
+manager = EcosystemManager()
+manager.sync()  # Syncs latest site and extension metadata to local Parquet files
+
+# Access as Polars DataFrame for fast analytics
+df_sites = manager.get_sites_dataframe()
+df_extensions = manager.get_extensions_dataframe()
+
+# Access as typed Pydantic models
+sites = manager.get_sites()
+```
+
+## Command Line Interface
+
+The toolkit includes a `dartfx-ckan` CLI for administrative tasks:
+
+```bash
+# Synchronize ecosystem datasets
+dartfx-ckan ecosystem sync
+
+# Show verbose output and API calls
+dartfx-ckan ecosystem sync --verbose
+
+# Force refresh even if local data is up-to-date
+dartfx-ckan ecosystem sync --force
+```
 
 ## Roadmap
 
-...
+- [x] Create a class to describe and connect to a CKAN server
+- [x] Gather server information (version, extensions, basic metadata)
+- [x] Gather server statistics (#datasets, #organizations, #groups/projects)
+- [x] Browse and search catalog data
+- [x] Implement CKAN Ecosystem synchronization and local querying (Parquet/Polars)
+- [x] Added `dartfx-ckan` CLI for ecosystem management
+- [ ] Add async wrappers for parallel API operations
+- [ ] Add adapter strategy for deployment-specific CKAN variations
 
 ## Contributing
 

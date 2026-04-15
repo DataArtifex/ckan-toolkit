@@ -11,8 +11,6 @@ Key capabilities include:
 - Browsing catalogs and searching for datasets.
 - Handling CKAN metadata and resources.
 
-
-
 ### Architecture
 
 - **CKAN Python Package**: This toolkit is built on top of the CKAN Action API python package (ckanapi)
@@ -22,13 +20,15 @@ Key capabilities include:
 - **Async Support**: Where possible, asynchronous I/O is used to handle multiple API requests efficiently.
 - **Adapter Pattern**: The toolkit can be extended to support different CKAN versions or customized deployments.
 
-### Core Components
+## Roadmap
 
-> **Note for agents**: The following modules are planned but not yet implemented. The package currently only contains `__about__.py` and `__init__.py`. Verify actual module existence in `src/` before assuming any of these exist.
-
-- `dartfx.ckan.client`: The main client for interacting with a CKAN server.
-- `dartfx.ckan.models`: Pydantic models for CKAN entities (datasets, resources, packages, etc.).
-- `dartfx.ckan.api`: Lower-level API wrappers.
+### Server
+- Create a class to describe and connect to a CKAN server
+- Call the underlying API to gather information on the server
+ - version, extensions, and other available characteristics
+- Gather server statistics
+    - #datasets, #organizations, #projects, etc.
+- Browse and search the catalog
 
 
 

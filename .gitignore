@@ -231,3 +231,7 @@ Temporary Items
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# Ecosystem Parquet files
+src/dartfx/ckan/ecosystem/data/*.parquet
+src/dartfx/ckan/ecosystem/data/sync_state.json
