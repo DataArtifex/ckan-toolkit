@@ -1,8 +1,11 @@
 """Tests for the dartfx.ckan.ecosystem manager."""
 
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,12 +13,17 @@ from dartfx.ckan.ecosystem.manager import EcosystemManager
 from dartfx.ckan.ecosystem.models import EcosystemExtensions, EcosystemSites
 from dartfx.ckan.models import Dataset, Resource
 
+_DUMMY_CSV = b"tstamp,name,url,num_datasets\n2024-01-01,testsite,http://test,42\n"
 
-def dummy_urlretrieve(_url: str, filename: str) -> None:
-    # Write a dummy CSV matching Sites structure
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("tstamp,name,url,num_datasets\n")
-        f.write("2024-01-01,testsite,http://test,42\n")
+
+@contextmanager
+def fake_urlopen(_req: Any):
+    """Fake urllib.request.urlopen that returns a dummy CSV response."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = _DUMMY_CSV
+    mock_response.__enter__ = lambda s: s
+    mock_response.__exit__ = MagicMock(return_value=False)
+    yield mock_response
 
 
 class FakeCKANServer:
@@ -44,7 +52,7 @@ def test_ecosystem_models() -> None:
 def test_ecosystem_manager_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test sync flow of the EcosystemManager."""
     monkeypatch.setattr("dartfx.ckan.ecosystem.manager.CKANServer", FakeCKANServer)
-    monkeypatch.setattr("urllib.request.urlretrieve", dummy_urlretrieve)
+    monkeypatch.setattr("dartfx.ckan.ecosystem.manager.urllib.request.urlopen", fake_urlopen)
 
     manager = EcosystemManager(data_dir=tmp_path)
 
