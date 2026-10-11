@@ -1,31 +1,26 @@
 # dartfx-ckan
 
-[![PyPI - Version](https://img.shields.io/pypi/v/dartfx-ckan.svg)](https://pypi.org/project/dartfx-ckan)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/dartfx-ckan.svg)](https://pypi.org/project/dartfx-ckan)
-[![CI](https://github.com/DataArtifex/dartfx-ckan/actions/workflows/test.yml/badge.svg)](https://github.com/DataArtifex/dartfx-ckan/actions/workflows/test.yml)
-[![License](https://img.shields.io/github/license/DataArtifex/dartfx-ckan.svg)](https://github.com/DataArtifex/dartfx-ckan/blob/main/LICENSE.txt)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Development Status](https://img.shields.io/badge/status-early%20release-orange.svg)](https://github.com/DataArtifex/ckan-toolkit)
+[![Documentation](https://img.shields.io/badge/docs-blue)](https://www.dataartifex.org/ckan-toolkit/)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask%20DeepWiki-AI%20Docs-5C54E5)](https://deepwiki.com/DataArtifex/ckan-toolkit)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Package Status](https://img.shields.io/badge/PyPI-not%20published-lightgrey)](https://github.com/DataArtifex/ckan-toolkit)
+[![CI](https://github.com/DataArtifex/ckan-toolkit/actions/workflows/test.yml/badge.svg)](https://github.com/DataArtifex/ckan-toolkit/actions/workflows/test.yml)
+[![Code style: Ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg?logo=ruff&logoColor=D7FF64)](https://github.com/astral-sh/ruff)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](code_of_conduct.md)
-[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/DataArtifex/dartfx-ckan)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-**This project is in its early development stages. Stability is not guaranteed, and documentation is limited. We welcome your feedback and contributions.**
+A high-level, type-safe Python toolkit and CLI for discovering, harvesting, and interacting with CKAN repositories worldwide.
 
 ## Overview
 
-The purpose of this toolkit is to facilitate interactions with CKAN servers and catalogs.
-It provides a high-level, type-safe Python toolkit for programmatic interaction with CKAN repositories, focusing on discovery, metadata retrieval, and dataset access.
-
-
-## Bootstrapping a New Project
-
-If you are using this repository as a template, run the included rename script to set your project and package names:
-
-```bash
-./rename.sh "my-project-name" "my_package_name"
-```
-
-2. **Register with DeepWiki**: To ensure your documentation is indexed and discoverable by AI agents, register your new repository at [DeepWiki.com](https://deepwiki.com/).
+The purpose of this toolkit is to facilitate programmatic interactions with CKAN servers, catalogs, and ecosystems:
+- **Global Repository Discovery**: Discover 600+ CKAN installations worldwide with metadata, versions, and country crosswalks.
+- **Resilient Metadata Harvester**: Incremental harvesting engine with SHA-256 verification, manifest tracking, 24-hour catalog caching, and standardized error classification.
+- **Multiple Metadata Formats**: Fetch and export CKAN package metadata in JSON (`json`), DCAT RDF/XML (`dcat`), JSON-LD (`jsonld`), Turtle (`ttl`), and dataset resources (`resources`).
+- **Live Statistics & Health Monitoring**: Query server statistics, dataset counts, latency, and extensions across worldwide instances.
+- **Ecosystem Data Analytics**: Native synchronization and local querying of CKAN Ecosystem datasets via Polars and Parquet.
 
 ## Installation
 
@@ -33,115 +28,174 @@ This project recommends using [uv](https://github.com/astral-sh/uv) for fast and
 
 ### Using uv (Recommended)
 
-To set up the development environment with `uv`:
-
 ```bash
-# Install dependencies and create virtual environment
-uv sync
+uv add dartfx-ckan
 ```
 
-### Using Hatch
-
-You can also use [Hatch](https://hatch.pypa.io/) directly:
-
+For development:
 ```bash
-# Run tests
-hatch run test
-
-# Enter the default shell
-hatch shell
+uv sync --all-groups
 ```
 
-### Local Installation
-
-For traditional installation:
+### Traditional Installation
 
 ```bash
 pip install -e .
 ```
 
+## Command Line Interface (CLI)
 
-## Development
+The package provides the `dartfx-ckan` CLI tool:
 
-### Version Management
-Versions are managed dynamically in `src/dartfx/ckan/__about__.py`. You can use `hatch version` to view or bump the version.
+### 1. Global Installation Discovery
 
-### Secret Management
-For local development, create a `.env` file in the root directory. This file is git-ignored and can be used to store local API keys or configuration. These are automatically loaded by the test suite.
+List and filter worldwide CKAN repositories:
 
-### Running Tests
 ```bash
-uv run pytest
+# List top 10 CKAN installations
+dartfx-ckan installations --limit 10
+
+# Filter by country (ISO-2 code or country name)
+dartfx-ckan installations --country ES
+dartfx-ckan installations --country "United States"
+
+# Export discovered servers to JSON or CSV
+dartfx-ckan installations --country GB --format json
+dartfx-ckan installations --limit 20 --format csv
 ```
 
-### Building Documentation
+### 2. Server Information & Capabilities
+
+Inspect metadata, version, and active extensions:
+
 ```bash
-hatch run docs:build
+# Inspect a specific CKAN instance
+dartfx-ckan info demo.ckan.org
+dartfx-ckan info data.gov
 ```
 
+### 3. Catalog Search & Dataset Inspection
 
+Search for datasets and export records:
 
-## Usage
+```bash
+# Full-text dataset search
+dartfx-ckan search "climate" --hostname demo.ckan.org --limit 10
+
+# Inspect dataset metadata
+dartfx-ckan dataset gold-prices --hostname demo.ckan.org
+
+# Export in DCAT XML, JSON-LD, or Turtle
+dartfx-ckan dataset my-dataset --hostname demo.ckan.org --export dcat
+dartfx-ckan dataset my-dataset --hostname demo.ckan.org --export jsonld
+```
+
+### 4. Server Statistics & Monitoring
+
+Check live latency, status badges, and dataset counts:
+
+```bash
+# Query all known CKAN installations
+dartfx-ckan stats
+
+# Query specific server with forced cache refresh
+dartfx-ckan stats --server demo.ckan.org --refresh
+
+# Filter stats by country
+dartfx-ckan stats --country CA
+```
+
+### 5. Resilient Metadata Harvester
+
+Incrementally harvest and synchronize datasets into structured local storage:
+
+```bash
+# Harvest datasets from a single server (default: JSON metadata)
+dartfx-ckan harvest --server demo.ckan.org --limit 50 --repo-dir ./data
+
+# Harvest multiple formats simultaneously (JSON, DCAT, Resources)
+dartfx-ckan harvest --server demo.ckan.org --format json,dcat,resources
+
+# Harvest with keyword filter and date filter
+dartfx-ckan harvest --server demo.ckan.org --query "environment" --since 2024-01-01
+
+# Dry-run mode
+dartfx-ckan harvest --server demo.ckan.org --dry-run
+```
+
+### 6. Harvest Error Analytics
+
+Inspect and breakdown errors recorded in repository manifests:
+
+```bash
+# Summary table of error categories
+dartfx-ckan errors --repo-dir ./data
+
+# Matrix breakdown by format
+dartfx-ckan errors --repo-dir ./data --by-format
+
+# Breakdown by server
+dartfx-ckan errors --repo-dir ./data --by-server
+
+# Detailed failed dataset IDs and HTTP snippets
+dartfx-ckan errors --repo-dir ./data --details
+```
+
+### 7. Ecosystem Synchronization
+
+```bash
+# Synchronize CKAN Ecosystem catalog to local Parquet files
+dartfx-ckan ecosystem sync
+```
+
+## Python API Usage
 
 ```python
-from dartfx.ckan import CKANServer
+from dartfx.ckan import (
+    CKANServer,
+    SearchParameters,
+    fetch_ckan_installations,
+    ServerHarvester,
+    fetch_server_stats,
+)
 
-server = CKANServer("https://demo.ckan.org")
+# 1. Discover worldwide installations
+installations = fetch_ckan_installations(country="US")
+for inst in installations[:5]:
+    print(inst.name, inst.clean_hostname, inst.url)
 
-# Server metadata
-print(server.info.ckan_version)
-print(server.info.site_title)
+# 2. Connect to a CKAN Server
+server = CKANServer("demo.ckan.org")
+print("Version:", server.info.ckan_version)
+print("Title:", server.info.site_title)
+print("Datasets:", server.stats.dataset_count)
 
-# Server statistics
-print(server.stats.dataset_count)
-print(server.stats.organization_count)
+# 3. Search datasets with typed parameters
+params = SearchParameters(q="climate", rows=5, sort="metadata_modified desc")
+results = server.search(params)
+for pkg in results.get("results", []):
+    print(pkg["title"], pkg["name"])
 
-# Catalog browsing and search
-datasets = server.list_datasets(limit=5)
-search_results = server.search_datasets("water", limit=5)
-dataset = server.get_dataset("sample-dataset")
-organizations = server.list_organizations(limit=5)
-
-# CKAN Ecosystem synchronization and querying
-from dartfx.ckan.ecosystem import EcosystemManager
-
-manager = EcosystemManager()
-manager.sync()  # Syncs latest site and extension metadata to local Parquet files
-
-# Access as Polars DataFrame for fast analytics
-df_sites = manager.get_sites_dataframe()
-df_extensions = manager.get_extensions_dataframe()
-
-# Access as typed Pydantic models
-sites = manager.get_sites()
+# 4. Programmatic Harvesting
+harvester = ServerHarvester("demo.ckan.org", repo_root="./harvested_data")
+sync_stats = harvester.sync(limit=10, metadata_formats=["json", "dcat"])
+print(f"Added: {len(sync_stats['added'])}, Unchanged: {len(sync_stats['unchanged'])}")
 ```
 
-## Command Line Interface
-
-The toolkit includes a `dartfx-ckan` CLI for administrative tasks:
+## Testing & Quality Assurance
 
 ```bash
-# Synchronize ecosystem datasets
-dartfx-ckan ecosystem sync
+# Run pytest test suite
+uv run pytest
 
-# Show verbose output and API calls
-dartfx-ckan ecosystem sync --verbose
+# Check static typing with Pyrefly
+uv run pyrefly check src tests
 
-# Force refresh even if local data is up-to-date
-dartfx-ckan ecosystem sync --force
+# Run linter and formatter checks with Ruff
+uv run ruff check .
+uv run ruff format .
 ```
 
-## Roadmap
+## License
 
-- [x] Create a class to describe and connect to a CKAN server
-- [x] Gather server information (version, extensions, basic metadata)
-- [x] Gather server statistics (#datasets, #organizations, #groups/projects)
-- [x] Browse and search catalog data
-- [x] Implement CKAN Ecosystem synchronization and local querying (Parquet/Polars)
-- [x] Added `dartfx-ckan` CLI for ecosystem management
-- [ ] Add async wrappers for parallel API operations
-- [ ] Add adapter strategy for deployment-specific CKAN variations
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines and information on how to get started.
+This project is licensed under the MIT License. See [LICENSE.txt](./LICENSE.txt) for details.
