@@ -1,67 +1,108 @@
-# Implementation Notes
+# Technical Implementation Notes
 
-## Overview
+## Architecture Overview
 
-This initial implementation introduces a high-level CKAN server abstraction built on top of `ckanapi` with typed models powered by Pydantic.
+`dartfx-ckan` provides a type-safe, resilient Python toolkit and CLI for interacting with CKAN repositories, modeled after the reference architectures established in `dataverse-toolkit` and `nada-toolkit`.
 
-The implementation follows the roadmap phases:
+The codebase is organized into modular layers:
+1. **Repository Discovery & Models** (`ckan.py`, `models.py`)
+2. **Core Server Interface** (`server.py`, `api.py`)
+3. **Resilient Metadata Harvester & Sync Engine** (`harvester.py`)
+4. **Ecosystem Analytics** (`ecosystem/`)
+5. **Command Line Interface** (`cli.py`)
 
-1. Create a class to describe and connect to a CKAN server
-2. Call underlying API to gather server information
-3. Gather server statistics
-4. Browse and search catalog data
+---
 
-## Module Structure
+## 1. Global Repository Discovery (`ckan.py`)
 
-- `src/dartfx/ckan/exceptions.py`
-  - Custom exception hierarchy used across the package.
-- `src/dartfx/ckan/models.py`
-  - Pydantic models for server metadata, stats, datasets, organizations, and resources.
-- `src/dartfx/ckan/api.py`
-  - Low-level wrapper around `ckanapi.RemoteCKAN` that executes actions and validates responses.
-- `src/dartfx/ckan/server.py`
-  - Main `CKANServer` class exposing a simple, typed API for callers.
-- `src/dartfx/ckan/ecosystem/`
-  - Specialized module for interacting with the official CKAN Ecosystem catalog.
-  - Implements local Parquet-based caching for high-performance querying of global CKAN site and extension metadata.
-- `src/dartfx/ckan/cli.py`
-  - Typer-based entrypoint for the `dartfx-ckan` command-line tool.
+- **`ServerInstallation`**: Represents a CKAN server with sanitized hostname, display name, version, dataset counts, and country codes.
+- **Country Resolution**:
+  - `COUNTRY_TO_ISO2`: Standardized ISO 3166-1 Alpha-2 dictionary.
+  - `get_iso2_code`: Normalizes raw country strings into 2-letter codes.
+  - `infer_country_from_hostname`: Resolves country code top-level domains (ccTLDs like `.uk`, `.ca`, `.es`, `.gov`) to ISO2 codes when metadata does not specify a country.
+  - `matches_country`: Flexible matching supporting ISO-2 codes and substring name queries.
+- **Discovery Strategy**:
+  - Aggregates over 600 unique worldwide CKAN instances from local/remote ecosystem Parquet data (`ckan-sites-metadata.parquet`).
+  - Merges with known major national/international default CKAN installations.
+  - Supports synthesizing a fallback `ServerInstallation` for private or unlisted servers.
 
-## Design Decisions
+---
 
-### Synchronous Core API
+## 2. Server Abstraction (`server.py` & `api.py`)
 
-`ckanapi` is synchronous-first, so this first release keeps a synchronous core. This avoids hidden thread scheduling behavior and keeps error handling straightforward.
+- **`CKANServer`**:
+  - Accepts a hostname, full URL, or `ServerInstallation`.
+  - Automatically loads credentials from environment variables (`CKAN_API_KEY`, `DARTFX_CKAN_API_KEY`, `CKAN_API_TOKEN`).
+  - Integrated with `requests_cache.CachedSession` for fast in-memory response caching.
+  - Provides typed methods:
+    - `search(params: SearchParameters)`: Structured querying with Solr syntax, filters (`fq`), and sorting.
+    - `get_info_version()` & `get_info_server()`: Standardized server info and installed extension inspection.
+    - `get_dataset(name_or_id)`: Typed `Dataset` retrieval.
+    - `get_dataset_export(identifier, export_format)`: Formats including JSON, DCAT XML, JSON-LD, and Turtle.
+    - `list_organizations()` / `get_organizations()`.
 
-### Typed Boundaries
+---
 
-All server metadata and catalog responses are normalized through Pydantic models. This catches malformed responses early and provides stable, type-safe return values.
+## 3. Resilient Metadata Harvester (`harvester.py`)
 
-### Cached Server Metadata
+- **Incremental Synchronization**:
+  - Compares remote dataset state against local manifest records (`.manifest.json`).
+  - Computes SHA-256 hashes of downloaded content to detect additions, updates, and unchanged datasets.
+  - Detects deletions when datasets are removed from the remote catalog.
+  - Local file organization: `<repo_root>/<server_hostname>/<sanitized_pid>/metadata/<file_name>`.
+- **Supported Formats**:
+  - `json`: Standard CKAN package JSON (`.ckan.json`).
+  - `dcat`: DCAT 2/3 RDF/XML (`.dcat.xml`).
+  - `jsonld`: DCAT JSON-LD (`.dcat.jsonld`).
+  - `ttl`: DCAT Turtle (`.dcat.ttl`).
+  - `resources`: Dataset resource list (`.resources.json`).
+- **24-Hour Catalog & Stats Caching**:
+  - Paginates `package_search` and caches catalog listings locally (`.catalog_cache.json`).
+  - Stores server probe results (`.stats_cache.json`) to minimize network queries across repeated runs.
+  - Bypassed on demand using `--refresh` / `--refresh-catalog`.
+- **Standardized Error Classification**:
+  - Categorizes harvest failures into consistent error types:
+    - `Exporter Not Supported on Server`
+    - `HTTP 401: Authentication Required (API Token)`
+    - `HTTP 403: Restricted Dataset / Bot Protection (WAF)`
+    - `HTTP 404: Dataset / Endpoint Not Found`
+    - `HTTP 410: Dataset Deleted / Gone`
+    - `HTTP 422: Unprocessable Entity`
+    - `HTTP 5xx: Server Error`
+    - `HTTP 429: Rate Limited`
+    - `Request Timeout`
+    - `Network / Connection Error`
+    - `JSON / XML Parsing Error`
+- **Error Analytics & Manifest Reporting**:
+  - `analyze_harvest_errors`: Collects errors across manifests and aggregates counts by error category, format matrix, and server.
+  - `render_harvest_errors`: Formats tables and breakdown matrices in Rich.
 
-`CKANServer.info` and `CKANServer.stats` are lazily fetched and cached. This keeps repeated access cheap while still allowing explicit refresh using `refresh_info()` and `refresh_stats()`.
+---
 
-### Explicit Error Surface
+## 4. Token Resolution Hierarchy
 
-Low-level API failures are wrapped in custom exceptions:
+API tokens are resolved dynamically without hardcoding:
+1. Explicit CLI flag (`--api-token` / `-k`)
+2. Server-specific directory token file (`<repo_root>/<host>/.api_token`)
+3. Central repository tokens mapping (`<repo_root>/.ckan_tokens.json`)
+4. Current working directory tokens (`.ckan_tokens.json` or `.tokens.json`)
+5. Server-specific environment variable (`CKAN_API_TOKEN_<HOST>`)
+6. Global environment variable (`CKAN_API_KEY`, `DARTFX_CKAN_API_KEY`, `CKAN_API_TOKEN`)
 
-- `CKANConnectionError`
-- `CKANAPIRequestError`
-- `CKANValidationError`
+---
 
-This keeps calling code independent from underlying transport exceptions.
+## 5. CLI Architecture (`cli.py`)
 
-### Ecosystem Synchronization & Local Cache
-
-The `ecosystem` module is designed for performance and offline reliability. Rather than querying the live ecosystem catalog repeatedly, it synchronizes remote CSV datasets into local Parquet files.
-
-- **Data Storage**: Uses `polars` for fast I/O and efficient Parquet storage.
-- **Caching Strategy**: Primary storage is within the package directory (`.../ecosystem/data/`). A fallback mechanism redirects to `~/.dartfx/` if the package environment is read-only.
-- **Validation**: Uses Pydantic models for individual record access while providing Polars DataFrames for analytical tasks.
-
-## Future Work
-
-- Add optional TTL-based cache expiry for `info` and `stats`
-- Add async-compatible wrappers for concurrent catalog operations
-- Extend statistics support with resource-level counts when available
-- Add dedicated adapter support for CKAN deployment variations
+Built with `typer` and `rich`:
+- **macOS Smart Dash Normalization**: Sanitizes `–` and `—` arguments to standard hyphens before parsing.
+- **Output Formats**: Flexible display in interactive `table`, `json`, or `csv`.
+- **Commands**:
+  - `installations`: Worldwide repository list with country filtering.
+  - `info`: Server metadata and extension capabilities.
+  - `search`: Full-text and filtered dataset search.
+  - `dataset`: Metadata inspection and DCAT/JSON export.
+  - `organizations`: Organization directory.
+  - `stats`: Live server statistics, latency indicators, and status badges.
+  - `harvest`: Incremental sync engine with real-time Rich progress bars.
+  - `errors`: Diagnostic error report from repository manifests.
+  - `ecosystem`: Management of official CKAN Ecosystem Parquet datasets.

@@ -4,39 +4,29 @@ Welcome, fellow AI. This file provides context and instructions for working on t
 
 ## Project Specifications
 
-The purpose of this toolkit is to facilitate interactions with CKAN servers and catalogs.
+The purpose of this toolkit is to facilitate interactions with CKAN servers, catalogs, and ecosystems.
 It provides a high-level, type-safe Python toolkit for programmatic interaction with CKAN repositories.
 Key capabilities include:
-- Discovering and retrieving datasets from CKAN servers.
-- Browsing catalogs and searching for datasets.
-- Handling CKAN metadata and resources.
+- **Global Discovery**: Fetching and interacting with the worldwide network of 600+ CKAN installations (from CKAN ecosystem data, directories, and defaults).
+- **Advanced Search & Catalog**: Wrapper for the CKAN Action API supporting filtering, keywords, organizations, and country queries.
+- **Dataset Metadata & Exports**: Retrieving CKAN Package JSON (`json`), DCAT 2/3 RDF/XML (`dcat`), JSON-LD (`jsonld`), Turtle (`ttl`), and dataset resources (`resources`).
+- **Resilient Metadata Harvester**: Incremental synchronization with SHA-256 verification, manifest tracking, 24-hour catalog and statistics caching, and comprehensive error classification.
+- **Robust Interoperability**: Type-safe Pydantic models for request parameters and metadata structures.
+- **Performance Optimizations**: Native support for request caching via `requests-cache`.
 
 ### Architecture
 
-- **CKAN Python Package**: This toolkit is built on top of the CKAN Action API python package (ckanapi)
-    - The Platform documentation is available at https://docs.ckan.org/
-    - The Action API specific documentation is available at https://docs.ckan.org/en/latest/api/index.html
+- **CKAN Action API**: This toolkit integrates with the CKAN Action API (`package_search`, `package_show`, `organization_list`, `status_show`, etc.)
 - **Pydantic Models**: All CKAN metadata and API responses are modeled using Pydantic for validation and type safety.
-- **Async Support**: Where possible, asynchronous I/O is used to handle multiple API requests efficiently.
-- **Adapter Pattern**: The toolkit can be extended to support different CKAN versions or customized deployments.
-
-## Roadmap
-
-### Server
-- Create a class to describe and connect to a CKAN server
-- Call the underlying API to gather information on the server
- - version, extensions, and other available characteristics
-- Gather server statistics
-    - #datasets, #organizations, #projects, etc.
-- Browse and search the catalog
-
-
+- **Ecosystem Integration**: Direct querying and local caching of the CKAN Ecosystem sites and extensions catalog.
+- **Adapter Pattern**: Extensible design supporting varying CKAN versions and deployed extensions (such as `ckanext-dcat`, `ckanext-harvest`, `ckanext-spatial`).
 
 ## Project Stack
 
 - **Language**: Python 3.12+ (Strictly required)
 - **Dependency Management & Workflow**: [uv](https://github.com/astral-sh/uv) (Recommended) and [Hatch](https://hatch.pypa.io/).
 - **Linting & Formatting**: [Ruff](https://docs.astral.sh/ruff/) (extremely fast linter/formatter).
+- **Type Checking**: [Pyrefly](https://github.com/astral-sh/ruff) / static type checker.
 - **Git Hooks**: [pre-commit](https://pre-commit.com/) (ensures code quality before commits).
 - **Testing**: [pytest](https://docs.pytest.org/) with [coverage](https://coverage.readthedocs.io/).
 - **Documentation**: [Sphinx](https://www.sphinx-doc.org/) with [MyST-Parser](https://myst-parser.readthedocs.io/) (Markdown support) and [Read the Docs theme](https://sphinx-rtd-theme.readthedocs.io/).
@@ -56,7 +46,7 @@ To rename the project and package from the template defaults:
 This project uses `hatch` for environment management, but `uv` is preferred for speed.
 
 - To run tests: `uv run pytest` or `hatch run test`
-- To check types: `uv run mypy src tests` or `hatch run types:check`
+- To check types: `uv run pyrefly check src tests` or `hatch run types:check`
 - To build docs: `uv run sphinx-build -b html docs/source docs/build/html` or `hatch run docs:build`
 
 ## Coding Standards
@@ -65,11 +55,10 @@ This project uses `hatch` for environment management, but `uv` is preferred for 
 - Use type hints for all public APIs.
 - Docstrings should be in Google style or NumPy style (Sphinx compatible).
 - Prefer `pathlib` over `os.path`.
-- Prefer Pydantic for modeling over Python dataclasses or other similar packages
-- Prefer Polars package for data management over Pandas or other similar packages
-- **Dependency note**: Pydantic and Polars are not yet listed in `pyproject.toml`. Add them as dependencies before writing code that uses them.
+- Prefer Pydantic for modeling over Python dataclasses or other similar packages.
+- Prefer Polars package for data management over Pandas or other similar packages.
 - Strictly follow the project's Ruff configuration. Run `uv run ruff check .` and `uv run ruff format .` to ensure compliance before submitting changes.
-- Type checking is performed with `mypy`. No `[tool.mypy]` configuration is currently defined in `pyproject.toml`; run `uv run mypy src tests` and resolve all errors before submitting.
+- Type checking is performed with `pyrefly`. Run `uv run pyrefly check src tests` and resolve all errors before submitting.
 
 ## Testing Policy
 
@@ -84,8 +73,7 @@ This project uses `hatch` for environment management, but `uv` is preferred for 
 - Main documentation is in `.rst` or `.md` (via MyST).
 - Keep `README.md` up to date with core installation and usage instructions.
 - Keep a dedicated `IMPLEMENTATION.md` document up to date that describes the package/code technical implementation.
-- Maintain `CHANGELOG.md` with every significant change, ensuring the latest version is always at the top using the version number as heading (e.g., `## [0.1.0]`). Use short, concise bullet points.
-
+- Maintain `CHANGELOG.md` with every significant change, ensuring the latest version is always at the top using the version number as heading (e.g., `## [0.2.0]`). Use short, concise bullet points.
 
 ## Version Management
 
@@ -110,7 +98,7 @@ This project uses `hatch` for environment management, but `uv` is preferred for 
 ## Working with this Repo
 
 1. **Analysis**: Always start by reviewing `pyproject.toml` and `src/` structure.
-2. **Context**: Check `KIs/` (Knowledge Items) directory at the repo root if it exists — markdown files there contain domain-specific context and design decisions.
+2. **Context**: Check `KIs/` (Knowledge Items) directory at the repo root if it exists.
 3. **Execution**: Use `uv` or `hatch` for running scripts and tests.
-4. **Validation**: Always run `uv run ruff check .`, `uv run ruff format .`, and `uv run pytest` before finalizing changes.
+4. **Validation**: Always run `uv run ruff check .`, `uv run ruff format .`, `uv run pyrefly check src tests`, and `uv run pytest` before finalizing changes.
 5. **Contributions**: Follow the conventions in `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.

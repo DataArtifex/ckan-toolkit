@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from dartfx.ckan.models import Dataset, Organization, ServerInfo, ServerStats
 from dartfx.ckan.server import CKANServer
 
@@ -17,7 +19,7 @@ class FakeClient:
         self.stats_calls += 1
         return ServerStats(dataset_count=5, organization_count=2, group_count=1, project_count=1)
 
-    def action(self, action_name: str) -> dict[str, str]:
+    def action(self, action_name: str, *args: Any, **kwargs: Any) -> dict[str, str]:  # noqa: ARG002
         if action_name == "status_show":
             return {"status": "ok"}
         raise RuntimeError("invalid action")

@@ -23,7 +23,7 @@ class CKANAPIClient:
         *,
         api_key: str | None = None,
         user_agent: str | None = None,
-        remote_ckan: RemoteCKAN | None = None,
+        remote_ckan: Any = None,
     ) -> None:
         """Initialize a CKAN API client.
 

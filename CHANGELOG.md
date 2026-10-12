@@ -1,18 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0]
 
-- Added `dartfx.ckan.ecosystem` module for local synchronization and querying of official CKAN Ecosystem datasets.
-- Implemented `EcosystemManager` with intelligent caching and local `.parquet` storage using Polars.
-- Added a Typer-based CLI (`dartfx-ckan`) with `ecosystem sync` support.
-- Added a fallback caching mechanism to ensure write-ability across different deployment environments.
-- Enhanced API security and reliability with default `User-Agent` headers.
+- Mirrored harvester and repository discovery features from reference `dataverse-toolkit` and `nada-toolkit` implementations.
+- Added worldwide CKAN installation discovery (`fetch_ckan_installations`, `ServerInstallation`) spanning 600+ CKAN repositories.
+- Added ISO 3166-1 country crosswalk (`COUNTRY_TO_ISO2`, `get_iso2_code`, `matches_country`) and automatic ccTLD domain inference.
+- Implemented smart incremental metadata harvester (`ServerHarvester`, `harvest` command) supporting JSON, DCAT XML, JSON-LD, Turtle, and Resources.
+- Added SHA-256 verification, manifest tracking (`.manifest.json`), and change/deletion detection.
+- Added 24-hour catalog and statistics caching with `--refresh` support.
+- Added error classification system (`classify_harvest_error`, `analyze_harvest_errors`, `errors` command).
+- Added multi-server parallel statistics probing with latency indicator badges (`stats` command, `fetch_server_stats`).
+- Expanded `CKANServer` with `SearchParameters`, export formats, version inspection, and `requests-cache` session caching.
+- Enhanced `dartfx-ckan` CLI with `installations`, `info`, `search`, `dataset`, `organizations`, `stats`, `harvest`, and `errors` commands.
+- Migrated static analysis from Mypy to Pyrefly and updated dependencies in `pyproject.toml`.
+- Added pre-commit runner script (`scripts/precommit_uv_run.sh`) and updated `.pre-commit-config.yaml`.
 
 ## [0.1.1]
 
 - Expanded `Dataset`, `Resource`, and `Organization` Pydantic models with comprehensive fields.
 - Added `Tag` Pydantic model.
 - Improved model validation support for standard CKAN metadata responses.
+- Added `dartfx.ckan.ecosystem` module with `EcosystemManager` for Parquet caching and querying.
 
 ## [0.1.0]
 
@@ -21,4 +29,3 @@
 - Added `CKANAPIClient` wrapper over `ckanapi` action calls with response validation.
 - Added custom exception hierarchy for connection, request, and validation errors.
 - Added unit tests for models, API client, and server behavior.
-- Updated package exports and dependencies (`pydantic`, `polars`).

@@ -20,9 +20,13 @@ classifiers = [
 ]
 dependencies = [
   "ckanapi>=4.10.0",
-  "pydantic>=2.0.0",
-  "polars>=1.0.0",
-  "typer>=0.12.0",
+  "polars>=1.30.0",
+  "pydantic>=2.10.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.32.0",
+  "requests-cache>=1.0.0",
+  "rich>=14.0.0",
+  "typer>=0.24.0",
 ]
 
 [project.scripts]
@@ -45,12 +49,12 @@ path = "src/dartfx/ckan/__about__.py"
 [dependency-groups]
 dev = [
   "coverage[toml]>=7.0.0",
+  "pre-commit>=4.0.0",
+  "pyrefly>=1.0.0",
   "pytest>=9",
   "pytest-benchmark>=5.0.0",
-  "mypy>=1.0.0",
   "python-dotenv>=1.0.0",
   "ruff>=0.3.0",
-  "pre-commit>=4.0.0",
 ]
 docs = [
   "sphinx>=9.0.0",
@@ -75,7 +79,7 @@ python = ["3.12", "3.13"]
 dependencies = ["dev"]
 
 [tool.hatch.envs.types.scripts]
-check = "mypy {args:src tests}"
+check = "pyrefly check {args:src tests}"
 
 [tool.hatch.envs.docs]
 dependencies = ["docs"]
@@ -95,7 +99,7 @@ omit = ["src/dartfx/ckan/__about__.py"]
 
 [tool.coverage.paths]
 source = ["src/dartfx/ckan", "*/dartfx-ckan/src/dartfx/ckan"]
-tests = ["tests", "*/dartfx/dartfx-ckan/tests"]
+tests = ["tests"]
 
 [tool.coverage.report]
 exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
@@ -103,6 +107,10 @@ exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
 [tool.pytest.ini_options]
 pythonpath = "src"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
 log_cli = true
 log_cli_level = "DEBUG"
 log_cli_format = "%(asctime)s [%(levelname)s] %(message)s (%(filename)s:%(lineno)s)"
@@ -136,11 +144,8 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
-[tool.mypy]
-python_version = "3.12"
-check_untyped_defs = true
-ignore_missing_imports = true
-warn_unused_ignores = true
-show_error_codes = true
-mypy_path = "src"
-explicit_package_bases = true
+[tool.pyrefly]
+search-path = ["src"]
+python-version = "3.12.0"
+preset = "default"
+ignore-missing-imports = ["*"]
