@@ -69,3 +69,34 @@ def test_server_dataset_and_organization_methods():
     assert searched[0].name == "dataset-1"
     assert dataset.id == "d2"
     assert organizations[0].id == "o1"
+
+
+def test_server_get_info_fallback_when_client_fails():
+    class FailingClient(FakeClient):
+        def get_server_info(self) -> ServerInfo:
+            raise RuntimeError("405 Method Not Allowed")
+
+    server = CKANServer("data.gov", client=FailingClient())
+    version_info = server.get_info_version()
+    server_info = server.get_info_server()
+
+    assert version_info["live"] is False
+    assert version_info["data"]["version"] == "2.10"
+    assert server_info["live"] is False
+    assert server_info["data"]["title"] == "Data.gov"
+    assert "open data" in server_info["data"]["description"]
+
+
+def test_server_get_info_raises_when_no_installation_data():
+    class FailingClient(FakeClient):
+        def get_server_info(self) -> ServerInfo:
+            raise RuntimeError("Connection failed")
+
+    server = CKANServer("unknown-ckan-instance.xyz", client=FailingClient())
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Connection failed"):
+        server.get_info_version()
+
+    with pytest.raises(RuntimeError, match="Connection failed"):
+        server.get_info_server()

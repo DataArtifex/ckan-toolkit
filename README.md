@@ -69,8 +69,11 @@ dartfx-ckan installations --limit 20 --format csv
 Inspect metadata, version, and active extensions:
 
 ```bash
-# Inspect a specific CKAN instance
+# Inspect a live CKAN instance (via status_show)
 dartfx-ckan info demo.ckan.org
+dartfx-ckan info data.humdata.org
+
+# Inspect instances where live status_show is restricted (falls back to ecosystem catalog)
 dartfx-ckan info data.gov
 ```
 

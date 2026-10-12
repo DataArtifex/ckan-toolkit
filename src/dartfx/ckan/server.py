@@ -72,6 +72,11 @@ class CKANServer:
 
         if isinstance(raw_server, ServerInstallation):
             server_inst = raw_server
+            if lookup_installation and not server_inst.name and server_inst.clean_hostname:
+                for inst in fetch_ckan_installations(target_server=server_inst.clean_hostname, fallback_unlisted=False):
+                    if inst.clean_hostname.lower() == server_inst.clean_hostname.lower():
+                        server_inst = inst
+                        break
             clean_url = server_inst.url
         elif isinstance(raw_server, str):
             clean_s = raw_server.strip()
@@ -138,27 +143,70 @@ class CKANServer:
             return False
 
     def get_info_version(self) -> dict[str, Any]:
-        """Get version metadata from the server."""
-        info = self.info
+        """Get version metadata from the server.
+
+        Attempts to retrieve live server metadata via ``status_show``; if that action
+        fails or is restricted, falls back to cached ecosystem installation details.
+        """
+        is_live = True
+        try:
+            info = self.info
+            version = info.ckan_version or self.installation.version or "N/A"
+            site_title = info.site_title or self.installation.name or "N/A"
+            site_url = info.site_url or self.installation.url or self.server_url
+        except Exception:
+            is_live = False
+            version = self.installation.version or "N/A"
+            site_title = self.installation.name or "N/A"
+            site_url = self.installation.url or self.server_url
+            if not self.installation.name and not self.installation.version:
+                raise
+
         return {
-            "version": info.ckan_version or "N/A",
+            "version": version,
+            "live": is_live,
             "data": {
-                "version": info.ckan_version or "N/A",
-                "site_title": info.site_title or "N/A",
-                "site_url": info.site_url or self.server_url,
+                "version": version,
+                "site_title": site_title,
+                "site_url": site_url,
             },
         }
 
     def get_info_server(self) -> dict[str, Any]:
-        """Get high-level server metadata from the server."""
-        info = self.info
+        """Get high-level server metadata from the server.
+
+        Attempts to retrieve live server metadata via ``status_show``; if that action
+        fails or is restricted, falls back to cached ecosystem installation details.
+        """
+        is_live = True
+        try:
+            info = self.info
+            title = info.site_title or self.installation.name or "N/A"
+            description = info.site_description or self.installation.description or "N/A"
+            exts = info.extensions or (
+                self.installation.extensions if isinstance(self.installation.extensions, list) else []
+            )
+        except Exception:
+            is_live = False
+            title = self.installation.name or "N/A"
+            description = self.installation.description or "N/A"
+            if isinstance(self.installation.extensions, list):
+                exts = self.installation.extensions
+            elif isinstance(self.installation.extensions, str):
+                exts = [e.strip() for e in self.installation.extensions.split(",") if e.strip()]
+            else:
+                exts = []
+            if not self.installation.name and not self.installation.description:
+                raise
+
         return {
             "server": self.installation.clean_hostname,
+            "live": is_live,
             "data": {
-                "message": info.site_title or self.installation.name or self.installation.clean_hostname,
-                "title": info.site_title or "N/A",
-                "description": info.site_description or "N/A",
-                "extensions": info.extensions or [],
+                "message": title if title != "N/A" else self.installation.clean_hostname,
+                "title": title,
+                "description": description,
+                "extensions": exts,
             },
         }
 

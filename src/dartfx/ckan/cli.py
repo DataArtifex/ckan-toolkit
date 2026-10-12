@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from dotenv import find_dotenv, load_dotenv
@@ -13,7 +13,6 @@ from rich.table import Table
 
 from dartfx.ckan.ckan import (
     SearchParameters,
-    ServerInstallation,
     fetch_ckan_installations,
 )
 from dartfx.ckan.ecosystem.manager import EcosystemManager
@@ -56,8 +55,7 @@ class OutputFormat(StrEnum):
 def get_server(hostname: str | None = None, api_key: str | None = None) -> CKANServer:
     """Helper to create a CKANServer instance."""
     resolved_host = hostname or os.environ.get("CKAN_SERVER") or "demo.ckan.org"
-    installation = ServerInstallation(hostname=resolved_host)
-    return CKANServer(server=installation, api_key=api_key)
+    return CKANServer(server=resolved_host, api_key=api_key)
 
 
 @app.command()
@@ -157,18 +155,56 @@ def info(
     resolved_host = hostname or os.environ.get("CKAN_SERVER") or "demo.ckan.org"
     server_client = get_server(resolved_host, api_key)
 
+    is_fallback = False
     with console.status(f"[bold green]Fetching info from {resolved_host}..."):
         try:
             version_info = server_client.get_info_version()
             server_info = server_client.get_info_server()
+            if not version_info.get("live", True) or not server_info.get("live", True):
+                is_fallback = True
         except Exception as e:
-            console.print(f"[bold red]Error:[/] {e}")
-            raise typer.Exit(code=1) from e
+            inst = getattr(server_client, "installation", None)
+            if inst and (inst.name or inst.version or inst.description):
+                is_fallback = True
+                version_info = {
+                    "version": inst.version or "N/A",
+                    "live": False,
+                    "data": {
+                        "version": inst.version or "N/A",
+                        "site_title": inst.name or resolved_host,
+                        "site_url": inst.url or f"https://{resolved_host}",
+                    },
+                }
+                server_info = {
+                    "server": inst.clean_hostname or resolved_host,
+                    "live": False,
+                    "data": {
+                        "message": inst.name or resolved_host,
+                        "title": inst.name or resolved_host,
+                        "description": inst.description or "N/A",
+                        "extensions": inst.extensions if isinstance(inst.extensions, list) else [],
+                    },
+                }
+            else:
+                console.print(f"[bold red]Error:[/] {e}")
+                raise typer.Exit(code=1) from e
 
-    title = server_info.get("data", {}).get("title") or resolved_host
-    version = version_info.get("data", {}).get("version", "N/A")
-    desc = server_info.get("data", {}).get("description", "N/A")
-    exts = server_info.get("data", {}).get("extensions", [])
+    raw_server_data = server_info.get("data")
+    server_data: dict[str, Any] = raw_server_data if isinstance(raw_server_data, dict) else {}
+
+    raw_version_data = version_info.get("data")
+    version_data: dict[str, Any] = raw_version_data if isinstance(raw_version_data, dict) else {}
+
+    title = server_data.get("title") or resolved_host
+    version = version_data.get("version", "N/A")
+    desc = server_data.get("description", "N/A")
+    exts = server_data.get("extensions", [])
+
+    if is_fallback:
+        console.print(
+            f"[yellow]Notice:[/] Live status probe unavailable on {resolved_host} "
+            "(endpoint restricted or disabled). Showing ecosystem catalog details."
+        )
 
     console.print(f"\n[bold cyan]Server:[/] {title} ([dim]{resolved_host}[/dim])")
     console.print(f"[bold cyan]CKAN Version:[/] {version}")

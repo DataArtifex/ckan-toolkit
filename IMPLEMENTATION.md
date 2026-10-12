@@ -36,7 +36,7 @@ The codebase is organized into modular layers:
   - Integrated with `requests_cache.CachedSession` for fast in-memory response caching.
   - Provides typed methods:
     - `search(params: SearchParameters)`: Structured querying with Solr syntax, filters (`fq`), and sorting.
-    - `get_info_version()` & `get_info_server()`: Standardized server info and installed extension inspection.
+    - `get_info_version()` & `get_info_server()`: Standardized server info and installed extension inspection with automatic ecosystem directory fallback when live `status_show` is restricted or unavailable.
     - `get_dataset(name_or_id)`: Typed `Dataset` retrieval.
     - `get_dataset_export(identifier, export_format)`: Formats including JSON, DCAT XML, JSON-LD, and Turtle.
     - `list_organizations()` / `get_organizations()`.

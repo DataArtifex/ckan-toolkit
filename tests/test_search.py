@@ -97,3 +97,36 @@ def test_cli_info_command(monkeypatch):
     assert "Demo CKAN" in result.stdout
     assert "2.11.0" in result.stdout
     assert "dcat" in result.stdout
+
+
+def test_cli_info_command_fallback(monkeypatch):
+    mock_server = MagicMock()
+    mock_server.get_info_version.return_value = {"live": False, "data": {"version": "2.10"}}
+    mock_server.get_info_server.return_value = {
+        "live": False,
+        "data": {
+            "title": "Data.gov",
+            "description": "US Open Data",
+            "extensions": [],
+        },
+    }
+    monkeypatch.setattr("dartfx.ckan.cli.get_server", lambda *_args, **_kwargs: mock_server)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["info", "data.gov"])
+    assert result.exit_code == 0
+    assert "Notice: Live status probe unavailable on data.gov" in result.stdout
+    assert "Data.gov" in result.stdout
+    assert "2.10" in result.stdout
+
+
+def test_cli_info_command_failure_without_fallback(monkeypatch):
+    mock_server = MagicMock()
+    mock_server.installation = None
+    mock_server.get_info_version.side_effect = RuntimeError("Connection refused")
+    monkeypatch.setattr("dartfx.ckan.cli.get_server", lambda *_args, **_kwargs: mock_server)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["info", "broken.host.xyz"])
+    assert result.exit_code == 1
+    assert "Error:" in result.stdout
