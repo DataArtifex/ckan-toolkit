@@ -8,7 +8,7 @@
 import os
 import sys
 
-project = "Data Artifex Foo"
+project = "dartfx-ckan"
 copyright = "2024, Pascal Heus"
 author = "Pascal Heus"
 release = "0.1.0"

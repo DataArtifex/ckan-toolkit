@@ -1,6 +1,6 @@
 
 dartfx-ckan
----------
+===========
 
 .. automodule:: dartfx.ckan
    :members:

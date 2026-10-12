@@ -185,6 +185,37 @@ sync_stats = harvester.sync(limit=10, metadata_formats=["json", "dcat"])
 print(f"Added: {len(sync_stats['added'])}, Unchanged: {len(sync_stats['unchanged'])}")
 ```
 
+## Server Compatibility & API Constraints
+
+When interacting with worldwide CKAN servers, keep in mind several architectural and administrative constraints:
+
+### 1. Apex Domains vs. Catalog Endpoints
+Portals like `data.gov` or `open.canada.ca` host a static or CMS frontend (WordPress, Drupal, Cloud.gov Pages) on the apex domain, with CKAN hosted on a subdomain (e.g. `catalog.data.gov`) or subpath.
+- Cloud.gov Pages and reverse proxies often restrict allowed HTTP methods to `GET` and `HEAD` (`access-control-allow-methods: GET, HEAD`).
+- Standard CKAN client calls (which use HTTP `POST` for Action API endpoints) sent to the apex domain fail with **`HTTP 405 Method Not Allowed`**.
+
+### 2. Data.gov Restrictions & Gateway Migration
+- **Action API Lockdown**: Data.gov actively blocks direct anonymous requests to legacy CKAN Action API endpoints on `catalog.data.gov` (`package_search`, `status_show`) with policy restriction errors (`"Request not allowed by policy"`).
+- **GSA API Gateway (v4)**: Data.gov has migrated programmatic catalog access to the GSA API Gateway (`https://api.gsa.gov/technology/datagov/v4/`), requiring an API key from [api.data.gov](https://api.data.gov). It does not expose standard open CKAN Action API endpoints for harvesting.
+- **Federal Data Inventories**: Individual US federal agencies publish their public DCAT-US inventories at `https://<agency>.gov/data.json`.
+- **Toolkit Fallback**: `dartfx-ckan info data.gov` transparently falls back to cached ecosystem directory metadata.
+
+### 3. `status_show` Disablement & Security Hardening
+Many enterprise and government CKAN instances intentionally disable or firewall `status_show` to prevent extension enumeration and version disclosure.
+- `dartfx-ckan` automatically detects when `status_show` returns HTTP 405, 403, or 404, falling back to curated ecosystem installation metadata with an informative notice.
+
+### 4. Metadata Formats: Native vs. Extensions
+- **Native (Core CKAN)**: `json` (CKAN package JSON via `package_show`) and `resources` are supported out of the box on all standard CKAN instances.
+- **Extension-Dependent**:
+  - `dcat` (RDF/XML), `jsonld`, and `ttl` (Turtle) require [`ckanext-dcat`](https://github.com/ckan/ckanext-dcat) on the remote server.
+  - OGC CSW and ISO 19139 require [`ckanext-spatial`](https://github.com/ckan/ckanext-spatial).
+  - OAI-PMH (Dublin Core) requires [`ckanext-oaipmh`](https://github.com/geosolutions-it/ckanext-oaipmh).
+  - Project Open Data `data.json` requires [`ckanext-datajson`](https://github.com/GSA/ckanext-datajson).
+
+### 5. Rate Limiting, Bot Protection & Authentication
+- **Bot Mitigation / WAF**: Deployments behind Cloudflare or AWS CloudFront may return `HTTP 403 Forbidden` or `HTTP 429 Too Many Requests` during rapid crawling. Use the `--workers` option (default: 4) to control concurrency.
+- **Authentication**: Servers returning `HTTP 401 Unauthorized` require an API token, resolved via `DARTFX_CKAN_REPOSITORY_ROOT`, `.api_token`, or `CKAN_API_KEY`.
+
 ## Testing & Quality Assurance
 
 ```bash

@@ -106,3 +106,30 @@ Built with `typer` and `rich`:
   - `harvest`: Incremental sync engine with real-time Rich progress bars.
   - `errors`: Diagnostic error report from repository manifests.
   - `ecosystem`: Management of official CKAN Ecosystem Parquet datasets.
+
+---
+
+## 6. Server Compatibility & API Constraints
+
+### Apex Domain vs. Catalog Separation
+- Large portal deployments frequently place CMS applications (WordPress, Drupal, Cloud.gov Pages) on apex domains (e.g. `data.gov`, `open.canada.ca`).
+- Apex reverse proxies typically reject POST requests with `405 Method Not Allowed`, breaking `ckanapi.RemoteCKAN` POST calls.
+- The toolkit resolves installation metadata from curated ecosystem directories and targets underlying catalog subdomains (`catalog.data.gov`) where appropriate.
+
+### Data.gov Specific Restrictions
+- Legacy CKAN Action API endpoints (`/api/3/action/package_search`, `/api/3/action/status_show`) are blocked by policy on `catalog.data.gov`.
+- Public programmatic catalog access has transitioned to the GSA API Gateway (`https://api.gsa.gov/technology/datagov/v4/`) requiring `api.data.gov` API keys and proprietary REST endpoints rather than CKAN Action APIs.
+- Individual US agencies maintain DCAT-US 1.1 JSON catalogs at `https://<agency>.gov/data.json`.
+- The toolkit's `info` command catches `status_show` failures on `data.gov` and falls back to cached ecosystem directory records.
+
+### `status_show` Disablement & Security Hardening
+- Production servers frequently restrict `status_show` to prevent extension enumeration.
+- `CKANServer.get_info_version()` and `CKANServer.get_info_server()` catch `status_show` exceptions and gracefully fall back to `ServerInstallation` metadata.
+
+### Extension Dependencies
+- Native core: `json` (`package_show`) and `resources`.
+- Extensions required:
+  - `ckanext-dcat`: DCAT RDF/XML (`.dcat.xml`), JSON-LD (`.dcat.jsonld`), and Turtle (`.dcat.ttl`).
+  - `ckanext-spatial`: OGC CSW 2.0.2 (`/csw`) and ISO 19139 XML.
+  - `ckanext-oaipmh`: OAI-PMH 2.0 (`/oai`) and Dublin Core.
+  - `ckanext-datajson`: DCAT-US 1.1 `data.json`.

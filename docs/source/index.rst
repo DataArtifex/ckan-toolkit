@@ -1,11 +1,12 @@
-Welcome to Data Artifex Foo's documentation!
-============================================
+Welcome to dartfx-ckan's documentation!
+=======================================
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
    modules
+   compatibility
 
 
 Indices and tables

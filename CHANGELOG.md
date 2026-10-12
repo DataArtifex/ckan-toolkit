@@ -2,6 +2,7 @@
 
 ## [0.2.0]
 
+- Documented server compatibility, apex domain separation, Data.gov API restrictions, `status_show` hardening, and metadata standard requirements across `README.md`, `IMPLEMENTATION.md`, and Sphinx docs.
 - Added support for `DARTFX_CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY_ROOT`, and `CKAN_REPOSITORY` environment variables alongside `DARTFX_CKAN_REPOSITORY` for harvest repository root resolution.
 - Added resilient ecosystem catalog fallback to `CKANServer.get_info_version()`, `CKANServer.get_info_server()`, and `dartfx-ckan info` when live `status_show` probes are unavailable, restricted, or fail with HTTP 405/403.
 - Mirrored harvester and repository discovery features from reference `dataverse-toolkit` and `nada-toolkit` implementations.
