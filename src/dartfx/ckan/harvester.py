@@ -206,7 +206,8 @@ def resolve_server_token(
     if repo_root:
         search_dirs.append(repo_root)
     env_repo = (
-        os.environ.get("DARTFX_CKAN_REPOSITORY")
+        os.environ.get("DARTFX_CKAN_REPOSITORY_ROOT")
+        or os.environ.get("DARTFX_CKAN_REPOSITORY")
         or os.environ.get("CKAN_REPOSITORY_ROOT")
         or os.environ.get("CKAN_REPOSITORY")
     )
@@ -425,7 +426,8 @@ def analyze_harvest_errors(
     """Inspect repository manifests (.manifest.json) and generate structured error analytics."""
     target_repo = Path(repo_dir) if repo_dir else Path.cwd()
     env_repo = (
-        os.environ.get("DARTFX_CKAN_REPOSITORY")
+        os.environ.get("DARTFX_CKAN_REPOSITORY_ROOT")
+        or os.environ.get("DARTFX_CKAN_REPOSITORY")
         or os.environ.get("CKAN_REPOSITORY_ROOT")
         or os.environ.get("CKAN_REPOSITORY")
     )
@@ -1304,7 +1306,12 @@ def harvest(
         typer.Option(
             "--repo-dir",
             "-d",
-            envvar=["DARTFX_CKAN_REPOSITORY", "CKAN_REPOSITORY_ROOT", "CKAN_REPOSITORY"],
+            envvar=[
+                "DARTFX_CKAN_REPOSITORY_ROOT",
+                "DARTFX_CKAN_REPOSITORY",
+                "CKAN_REPOSITORY_ROOT",
+                "CKAN_REPOSITORY",
+            ],
             help="Repository storage root directory (defaults to CKAN_REPOSITORY_ROOT or current dir).",
         ),
     ] = None,

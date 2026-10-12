@@ -90,8 +90,16 @@ def test_repo_root_env_variable_resolution(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CKAN_REPOSITORY_ROOT", str(tmp_path))
     assert resolve_server_token(test_host) == "my-secret-token"
 
+    # With DARTFX_CKAN_REPOSITORY_ROOT
+    alt_path = tmp_path / "alt"
+    alt_token_file = alt_path / test_host / ".api_token"
+    alt_token_file.parent.mkdir(parents=True)
+    alt_token_file.write_text("dartfx-root-token", "utf-8")
+    monkeypatch.setenv("DARTFX_CKAN_REPOSITORY_ROOT", str(alt_path))
+    assert resolve_server_token(test_host) == "dartfx-root-token"
+
     # With analyze_harvest_errors
-    manifest = tmp_path / test_host / ".manifest.json"
+    manifest = alt_path / test_host / ".manifest.json"
     manifest.write_text('{"records": {}}', "utf-8")
     analysis = analyze_harvest_errors(server=test_host)
     assert analysis["total_errors"] == 0
