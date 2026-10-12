@@ -56,6 +56,9 @@ The codebase is organized into modular layers:
   - `jsonld`: DCAT JSON-LD (`.dcat.jsonld`).
   - `ttl`: DCAT Turtle (`.dcat.ttl`).
   - `resources`: Dataset resource list (`.resources.json`).
+- **Multi-Threaded HTTP Execution**:
+  - `stats`: Employs `ThreadPoolExecutor` to query installations in parallel (controlled by `--workers` / `--threads`, default: 8) and concurrently executes individual server endpoint probes (`status_show`, `package_search`, and `organization_list` via 3 parallel workers), reducing per-server latency to `max(t_probes)`.
+  - `harvest`: Employs `ThreadPoolExecutor` within `ServerHarvester.sync()` to download metadata records (`fetch_dataset_record`) concurrently across worker threads (controlled by `--workers` / `--threads`, default: 4), with thread-safe result aggregation and atomic manifest persistence.
 - **24-Hour Catalog & Stats Caching**:
   - Paginates `package_search` and caches catalog listings locally (`.catalog_cache.json`).
   - Stores server probe results (`.stats_cache.json`) to minimize network queries across repeated runs.

@@ -10,6 +10,7 @@ from dartfx.ckan.harvester import (
     ServerHarvester,
     analyze_harvest_errors,
     classify_harvest_error,
+    fetch_server_stats,
     format_dataset_url,
     format_response_latency,
     format_version,
@@ -190,6 +191,9 @@ def test_cli_harvest_and_errors_help() -> None:
     assert "--server" in clean1
     assert "--format" in clean1
     assert "--limit" in clean1
+    assert "--workers" in clean1
+    assert "--threads" in clean1
+    assert "-w" in clean1
 
     res2 = runner.invoke(app, ["errors", "--help"])
     assert res2.exit_code == 0
@@ -197,3 +201,70 @@ def test_cli_harvest_and_errors_help() -> None:
     assert "--by-format" in clean2
     assert "--by-server" in clean2
     assert "--details" in clean2
+
+
+def test_server_harvester_sync_multithreaded(tmp_path: Path, monkeypatch) -> None:
+    harvester = ServerHarvester("demo.ckan.org", tmp_path)
+
+    # Mock fetch_active_datasets to return 3 datasets
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_active_datasets",
+        lambda *_args, **_kwargs: {
+            "pkg-1": {"name": "pkg-1", "id": "id-1"},
+            "pkg-2": {"name": "pkg-2", "id": "id-2"},
+            "pkg-3": {"name": "pkg-3", "id": "id-3"},
+        },
+    )
+
+    # Mock fetch_dataset_record to return dummy json content
+    def mock_fetch_dataset_record(host, identifier, metadata_format="json", verbose=False, api_token=None):
+        del host, metadata_format, verbose, api_token
+        return json.dumps({"name": identifier, "title": f"Title {identifier}"}).encode("utf-8"), ".ckan.json", None
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_dataset_record", mock_fetch_dataset_record)
+
+    # Run sync with 3 workers
+    stats = harvester.sync(limit=3, metadata_formats="json", workers=3)
+    assert len(stats["added"]) == 3
+    assert "pkg-1::json" in stats["added"]
+    assert "pkg-2::json" in stats["added"]
+    assert "pkg-3::json" in stats["added"]
+
+    # Verify files created on disk
+    assert (tmp_path / "demo.ckan.org" / "pkg-1" / "metadata" / "ckan.json").exists()
+    assert (tmp_path / "demo.ckan.org" / "pkg-2" / "metadata" / "ckan.json").exists()
+    assert (tmp_path / "demo.ckan.org" / "pkg-3" / "metadata" / "ckan.json").exists()
+
+    # Re-running sync without force_verify should report unchanged
+    stats2 = harvester.sync(limit=3, metadata_formats="json", workers=2)
+    assert len(stats2["unchanged"]) == 3
+
+
+def test_fetch_server_stats_concurrent_probe(tmp_path: Path, monkeypatch) -> None:
+    class DummyResponse:
+        def __init__(self, data: dict, status_code: int = 200) -> None:
+            self._data = data
+            self.status_code = status_code
+
+        def json(self):
+            return self._data
+
+    def mock_get(url, headers=None, timeout=None):
+        del headers, timeout
+        if "status_show" in url:
+            return DummyResponse({"result": {"ckan_version": "2.10.1", "site_title": "My CKAN Portal"}})
+        if "package_search" in url:
+            return DummyResponse({"result": {"count": 42, "results": []}})
+        if "organization_list" in url:
+            return DummyResponse({"result": ["org1", "org2", "org3"]})
+        return DummyResponse({}, status_code=404)
+
+    monkeypatch.setattr("requests.get", mock_get)
+
+    stats = fetch_server_stats("fake.ckan.org", repo_root=tmp_path, refresh_cache=True)
+    assert stats["is_ckan"] is True
+    assert stats["version"] == "2.10.1"
+    assert stats["site_title"] == "My CKAN Portal"
+    assert stats["datasets"] == 42
+    assert stats["organizations"] == 3
+    assert stats["error"] is None

@@ -701,50 +701,70 @@ def fetch_server_stats(
 
     t0 = time.time()
     try:
-        # 1. Probe status_show
-        status_url = f"{base_url}/api/3/action/status_show"
-        try:
-            r_status = requests.get(status_url, headers=headers, timeout=timeout)
-            if r_status.status_code == 200:
-                stats["is_ckan"] = True
-                s_json = r_status.json()
-                res = s_json.get("result", {})
-                stats["version"] = res.get("ckan_version") or res.get("installed_version")
-                stats["site_title"] = res.get("site_title")
-            elif r_status.status_code == 401:
-                stats["is_ckan"] = True
-                stats["requires_token"] = True
-        except Exception:
-            pass
 
-        # 2. Probe package_search for dataset count
-        search_q = urllib.parse.quote(query) if query else "*:*"
-        search_url = f"{base_url}/api/3/action/package_search?q={search_q}&rows=0"
-        r_search = requests.get(search_url, headers=headers, timeout=timeout)
-        if r_search.status_code == 200:
-            stats["is_ckan"] = True
+        def _probe_status() -> requests.Response:
+            return requests.get(f"{base_url}/api/3/action/status_show", headers=headers, timeout=timeout)
+
+        def _probe_search() -> requests.Response:
+            search_q = urllib.parse.quote(query) if query else "*:*"
+            return requests.get(
+                f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
+                headers=headers,
+                timeout=timeout,
+            )
+
+        def _probe_orgs() -> requests.Response:
+            return requests.get(
+                f"{base_url}/api/3/action/organization_list",
+                headers=headers,
+                timeout=timeout,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as probe_executor:
+            f_status = probe_executor.submit(_probe_status)
+            f_search = probe_executor.submit(_probe_search)
+            f_orgs = probe_executor.submit(_probe_orgs)
+
+            # 1. Probe status_show
             try:
-                s_data = r_search.json()
-                res = s_data.get("result", {})
-                stats["datasets"] = res.get("count", 0)
+                r_status = f_status.result()
+                if r_status.status_code == 200:
+                    stats["is_ckan"] = True
+                    s_json = r_status.json()
+                    res = s_json.get("result", {})
+                    stats["version"] = res.get("ckan_version") or res.get("installed_version")
+                    stats["site_title"] = res.get("site_title")
+                elif r_status.status_code == 401:
+                    stats["is_ckan"] = True
+                    stats["requires_token"] = True
             except Exception:
                 pass
-        elif r_search.status_code == 401:
-            stats["is_ckan"] = True
-            stats["requires_token"] = True
 
-        # 3. Probe organization_list
-        org_url = f"{base_url}/api/3/action/organization_list"
-        try:
-            r_org = requests.get(org_url, headers=headers, timeout=timeout)
-            if r_org.status_code == 200:
+            # 2. Probe package_search for dataset count
+            r_search = f_search.result()
+            if r_search.status_code == 200:
                 stats["is_ckan"] = True
-                org_data = r_org.json()
-                res = org_data.get("result", [])
-                if isinstance(res, list):
-                    stats["organizations"] = len(res)
-        except Exception:
-            pass
+                try:
+                    s_data = r_search.json()
+                    res = s_data.get("result", {})
+                    stats["datasets"] = res.get("count", 0)
+                except Exception:
+                    pass
+            elif r_search.status_code == 401:
+                stats["is_ckan"] = True
+                stats["requires_token"] = True
+
+            # 3. Probe organization_list
+            try:
+                r_org = f_orgs.result()
+                if r_org.status_code == 200:
+                    stats["is_ckan"] = True
+                    org_data = r_org.json()
+                    res = org_data.get("result", [])
+                    if isinstance(res, list):
+                        stats["organizations"] = len(res)
+            except Exception:
+                pass
 
         stats["latency_seconds"] = round(time.time() - t0, 2)
 
@@ -777,6 +797,7 @@ def display_server_stats(
     cache_ttl_hours: float = 24.0,
     timeout: int = 10,
     repo_root: Path | None = None,
+    workers: int = 8,
 ) -> None:
     """Display live dataset and organization counts for CKAN servers."""
     installations = fetch_ckan_installations(
@@ -828,7 +849,8 @@ def display_server_stats(
 
     with progress:
         task_id = progress.add_task("Querying CKAN servers...", total=len(installations), server="")
-        with ThreadPoolExecutor(max_workers=min(8, len(installations))) as executor:
+        max_workers = max(1, min(workers, len(installations)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_query_stat, inst) for inst in installations]
             for future in as_completed(futures):
                 inst, stat = future.result()
@@ -1120,6 +1142,59 @@ class ServerHarvester:
         with open(self.manifest_file, "w", encoding="utf-8") as f:
             json.dump(self.manifest, f, indent=2)
 
+    def _record_download_result(
+        self,
+        record_key: str,
+        pid: str,
+        fmt: str,
+        content: bytes | None,
+        ext: str,
+        err_msg: str | None,
+        manifest_records: dict[str, Any],
+        stats: dict[str, list[Any]],
+    ) -> None:
+        if err_msg or not content:
+            err_cat = classify_harvest_error(err_msg)
+            self.manifest.setdefault("errors", {})[record_key] = {
+                "pid": pid,
+                "format": fmt,
+                "error_type": err_cat,
+                "reason": err_msg or "Failed to fetch metadata",
+                "failed_at": datetime.now(UTC).isoformat(),
+                "url": format_dataset_url(pid, host=self.host),
+            }
+            stats["errors"].append(
+                {
+                    "key": record_key,
+                    "pid": pid,
+                    "format": fmt,
+                    "reason": err_msg or "Failed to fetch",
+                }
+            )
+        else:
+            file_path, rel_str = get_dataset_metadata_path(self.server_dir, pid, ext)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+
+            sha256_hash = hashlib.sha256(content).hexdigest()
+            is_update = record_key in manifest_records
+
+            self.manifest.setdefault("records", {})[record_key] = {
+                "global_id": pid,
+                "format": fmt,
+                "file_path": rel_str,
+                "sha256": sha256_hash,
+                "updated_at": datetime.now(UTC).isoformat(),
+                "verified_at": datetime.now(UTC).isoformat(),
+            }
+            if "errors" in self.manifest and record_key in self.manifest["errors"]:
+                del self.manifest["errors"][record_key]
+
+            if is_update:
+                stats["updated"].append(record_key)
+            else:
+                stats["added"].append(record_key)
+
     def sync(
         self,
         query: str | None = None,
@@ -1136,6 +1211,7 @@ class ServerHarvester:
         api_token: str | None = None,
         progress_callback=None,
         catalog_progress_callback=None,
+        workers: int = 4,
     ) -> dict[str, list[Any]]:
         """Perform intelligent incremental sync (Additions, Updates, Deletions)."""
         effective_limit = None if limit == 0 else limit
@@ -1215,70 +1291,68 @@ class ServerHarvester:
         total_tasks = len(to_download)
         completed_tasks = 0
 
-        for pid, fmt, _reason in to_download:
-            record_key = f"{pid}::{fmt}"
-            if dry_run:
+        if dry_run:
+            for pid, fmt, _reason in to_download:
+                record_key = f"{pid}::{fmt}"
                 stats["added"].append(record_key)
                 completed_tasks += 1
                 if progress_callback:
                     progress_callback(completed_tasks, total_tasks, record_key)
-                continue
-
-            content, ext, err_msg = fetch_dataset_record(
-                self.host,
-                pid,
-                metadata_format=fmt,
-                verbose=verbose,
-                api_token=api_token,
-            )
-
-            if err_msg or not content:
-                err_cat = classify_harvest_error(err_msg)
-                self.manifest.setdefault("errors", {})[record_key] = {
-                    "pid": pid,
-                    "format": fmt,
-                    "error_type": err_cat,
-                    "reason": err_msg or "Failed to fetch metadata",
-                    "failed_at": datetime.now(UTC).isoformat(),
-                    "url": format_dataset_url(pid, host=self.host),
-                }
-                stats["errors"].append(
-                    {
-                        "key": record_key,
-                        "pid": pid,
-                        "format": fmt,
-                        "reason": err_msg or "Failed to fetch",
-                    }
+        elif workers <= 1 or total_tasks <= 1:
+            for pid, fmt, _reason in to_download:
+                record_key = f"{pid}::{fmt}"
+                content, ext, err_msg = fetch_dataset_record(
+                    self.host,
+                    pid,
+                    metadata_format=fmt,
+                    verbose=verbose,
+                    api_token=api_token,
                 )
-            else:
-                # Write file
-                file_path, rel_str = get_dataset_metadata_path(self.server_dir, pid, ext)
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_bytes(content)
+                self._record_download_result(
+                    record_key=record_key,
+                    pid=pid,
+                    fmt=fmt,
+                    content=content,
+                    ext=ext,
+                    err_msg=err_msg,
+                    manifest_records=manifest_records,
+                    stats=stats,
+                )
+                completed_tasks += 1
+                if progress_callback:
+                    progress_callback(completed_tasks, total_tasks, record_key)
+        else:
 
-                sha256_hash = hashlib.sha256(content).hexdigest()
-                is_update = record_key in manifest_records
+            def _fetch_record_task(item: tuple[str, str, str]) -> tuple[str, str, bytes | None, str, str | None]:
+                p, f, _ = item
+                c, e, err = fetch_dataset_record(
+                    self.host,
+                    p,
+                    metadata_format=f,
+                    verbose=verbose,
+                    api_token=api_token,
+                )
+                return p, f, c, e, err
 
-                self.manifest.setdefault("records", {})[record_key] = {
-                    "global_id": pid,
-                    "format": fmt,
-                    "file_path": rel_str,
-                    "sha256": sha256_hash,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    "verified_at": datetime.now(UTC).isoformat(),
-                }
-                # Clear previous error if resolved
-                if "errors" in self.manifest and record_key in self.manifest["errors"]:
-                    del self.manifest["errors"][record_key]
-
-                if is_update:
-                    stats["updated"].append(record_key)
-                else:
-                    stats["added"].append(record_key)
-
-            completed_tasks += 1
-            if progress_callback:
-                progress_callback(completed_tasks, total_tasks, record_key)
+            max_w = max(1, min(workers, total_tasks))
+            with ThreadPoolExecutor(max_workers=max_w) as executor:
+                futures = [executor.submit(_fetch_record_task, item) for item in to_download]
+                for future in as_completed(futures):
+                    p, f, content, ext, err_msg = future.result()
+                    record_key = f"{p}::{f}"
+                    self._record_download_result(
+                        record_key=record_key,
+                        pid=p,
+                        fmt=f,
+                        content=content,
+                        ext=ext,
+                        err_msg=err_msg,
+                        manifest_records=manifest_records,
+                        stats=stats,
+                    )
+                    completed_tasks += 1
+                    if progress_callback:
+                        progress_callback(completed_tasks, total_tasks, record_key)
 
         # Detect deleted datasets if full catalog sync was run
         if not target_id and not query and not since_date and not limit:
@@ -1345,12 +1419,13 @@ def harvest(
             help="Maximum number of datasets to harvest per server (0 for unlimited).",
         ),
     ] = 10,
-    workers: Annotated[  # noqa: ARG001
+    workers: Annotated[
         int,
         typer.Option(
             "--workers",
+            "--threads",
             "-w",
-            help="Number of concurrent server sync workers.",
+            help="Number of concurrent worker threads for metadata downloads.",
         ),
     ] = 4,
     since: Annotated[
@@ -1511,6 +1586,7 @@ def harvest(
                 force_verify=force_verify,
                 api_token=api_token,
                 progress_callback=_progress_cb,
+                workers=workers,
             )
 
             total_added += len(stats["added"])

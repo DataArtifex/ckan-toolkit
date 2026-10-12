@@ -464,6 +464,15 @@ def stats(
             help="HTTP request timeout in seconds per server query (default: 10).",
         ),
     ] = 10,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "--threads",
+            "-w",
+            help="Number of concurrent worker threads for querying servers (default: 8).",
+        ),
+    ] = 8,
 ) -> None:
     """Display live dataset and organization counts for CKAN servers."""
     from dartfx.ckan.harvester import display_server_stats
@@ -476,6 +485,7 @@ def stats(
         refresh_cache=refresh,
         cache_ttl_hours=float(cache_ttl),
         timeout=timeout,
+        workers=workers,
     )
 
 

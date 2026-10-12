@@ -107,3 +107,6 @@ def test_cli_stats_command_flags() -> None:
     assert "--cache-ttl" in clean_output
     assert "--timeout" in clean_output
     assert "-t" in clean_output
+    assert "--workers" in clean_output
+    assert "--threads" in clean_output
+    assert "-w" in clean_output

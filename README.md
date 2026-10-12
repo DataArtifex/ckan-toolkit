@@ -104,20 +104,20 @@ dartfx-ckan stats
 # Query specific server with forced cache refresh
 dartfx-ckan stats --server demo.ckan.org --refresh
 
-# Filter stats by country
-dartfx-ckan stats --country CA
+# Filter stats by country with custom worker threads
+dartfx-ckan stats --country CA --workers 12
 ```
 
 ### 5. Resilient Metadata Harvester
 
-Incrementally harvest and synchronize datasets into structured local storage:
+Incrementally harvest and synchronize datasets into structured local storage with concurrent multi-threading:
 
 ```bash
-# Harvest datasets from a single server (default: JSON metadata)
-dartfx-ckan harvest --server demo.ckan.org --limit 50 --repo-dir ./data
+# Harvest datasets from a single server with 8 worker threads
+dartfx-ckan harvest --server demo.ckan.org --limit 50 --workers 8 --repo-dir ./data
 
 # Harvest multiple formats simultaneously (JSON, DCAT, Resources)
-dartfx-ckan harvest --server demo.ckan.org --format json,dcat,resources
+dartfx-ckan harvest --server demo.ckan.org --format json,dcat,resources --workers 4
 
 # Harvest with keyword filter and date filter
 dartfx-ckan harvest --server demo.ckan.org --query "environment" --since 2024-01-01
@@ -181,7 +181,7 @@ for pkg in results.get("results", []):
 
 # 4. Programmatic Harvesting
 harvester = ServerHarvester("demo.ckan.org", repo_root="./harvested_data")
-sync_stats = harvester.sync(limit=10, metadata_formats=["json", "dcat"])
+sync_stats = harvester.sync(limit=10, metadata_formats=["json", "dcat"], workers=4)
 print(f"Added: {len(sync_stats['added'])}, Unchanged: {len(sync_stats['unchanged'])}")
 ```
 
