@@ -814,11 +814,25 @@ def display_server_stats(
         )
         return inst, s
 
-    with console.status("[bold green]Querying CKAN servers..."):
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold green]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[server]}[/dim]"),
+        console=console,
+        transient=True,
+    )
+
+    with progress:
+        task_id = progress.add_task("Querying CKAN servers...", total=len(installations), server="")
         with ThreadPoolExecutor(max_workers=min(8, len(installations))) as executor:
             futures = [executor.submit(_query_stat, inst) for inst in installations]
             for future in as_completed(futures):
                 inst, stat = future.result()
+                progress.update(task_id, advance=1, server=inst.clean_hostname or "")
                 name_disp = inst.name or inst.clean_hostname
                 clickable_host = f"[link={inst.url}]{name_disp}[/link]" if inst.url else name_disp
                 cc = inst.country_code or "-"

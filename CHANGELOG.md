@@ -12,7 +12,7 @@
 - Added SHA-256 verification, manifest tracking (`.manifest.json`), and change/deletion detection.
 - Added 24-hour catalog and statistics caching with `--refresh` support.
 - Added error classification system (`classify_harvest_error`, `analyze_harvest_errors`, `errors` command).
-- Added multi-server parallel statistics probing with latency indicator badges (`stats` command, `fetch_server_stats`).
+- Added multi-server parallel statistics probing with latency indicator badges and dynamic progress bar tracking (`stats` command, `fetch_server_stats`).
 - Expanded `CKANServer` with `SearchParameters`, export formats, version inspection, and `requests-cache` session caching.
 - Enhanced `dartfx-ckan` CLI with `installations`, `info`, `search`, `dataset`, `organizations`, `stats`, `harvest`, and `errors` commands.
 - Migrated static analysis from Mypy to Pyrefly and updated dependencies in `pyproject.toml`.
