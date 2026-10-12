@@ -2,6 +2,7 @@
 
 ## [0.2.0]
 
+- Added support for `CKAN_REPOSITORY_ROOT` and `CKAN_REPOSITORY` environment variables alongside `DARTFX_CKAN_REPOSITORY` for harvest repository root resolution.
 - Added resilient ecosystem catalog fallback to `CKANServer.get_info_version()`, `CKANServer.get_info_server()`, and `dartfx-ckan info` when live `status_show` probes are unavailable, restricted, or fail with HTTP 405/403.
 - Mirrored harvester and repository discovery features from reference `dataverse-toolkit` and `nada-toolkit` implementations.
 - Added worldwide CKAN installation discovery (`fetch_ckan_installations`, `ServerInstallation`) spanning 600+ CKAN repositories.

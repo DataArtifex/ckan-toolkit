@@ -205,7 +205,11 @@ def resolve_server_token(
     search_dirs = []
     if repo_root:
         search_dirs.append(repo_root)
-    env_repo = os.environ.get("DARTFX_CKAN_REPOSITORY")
+    env_repo = (
+        os.environ.get("DARTFX_CKAN_REPOSITORY")
+        or os.environ.get("CKAN_REPOSITORY_ROOT")
+        or os.environ.get("CKAN_REPOSITORY")
+    )
     if env_repo:
         search_dirs.append(Path(env_repo))
     search_dirs.append(Path.cwd())
@@ -420,7 +424,11 @@ def analyze_harvest_errors(
 ) -> dict[str, Any]:
     """Inspect repository manifests (.manifest.json) and generate structured error analytics."""
     target_repo = Path(repo_dir) if repo_dir else Path.cwd()
-    env_repo = os.environ.get("DARTFX_CKAN_REPOSITORY")
+    env_repo = (
+        os.environ.get("DARTFX_CKAN_REPOSITORY")
+        or os.environ.get("CKAN_REPOSITORY_ROOT")
+        or os.environ.get("CKAN_REPOSITORY")
+    )
     if not repo_dir and env_repo:
         target_repo = Path(env_repo)
 
@@ -1296,8 +1304,8 @@ def harvest(
         typer.Option(
             "--repo-dir",
             "-d",
-            envvar="DARTFX_CKAN_REPOSITORY",
-            help="Repository storage root directory (defaults to current dir).",
+            envvar=["DARTFX_CKAN_REPOSITORY", "CKAN_REPOSITORY_ROOT", "CKAN_REPOSITORY"],
+            help="Repository storage root directory (defaults to CKAN_REPOSITORY_ROOT or current dir).",
         ),
     ] = None,
     metadata_formats: Annotated[

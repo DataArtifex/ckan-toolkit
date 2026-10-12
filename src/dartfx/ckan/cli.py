@@ -484,7 +484,8 @@ def errors(
     repo_dir: Annotated[
         str | None,
         typer.Argument(
-            help="Path to repository storage root directory (defaults to DARTFX_CKAN_REPOSITORY or ./).",
+            envvar=["DARTFX_CKAN_REPOSITORY", "CKAN_REPOSITORY_ROOT", "CKAN_REPOSITORY"],
+            help="Path to repository storage root directory (defaults to CKAN_REPOSITORY_ROOT or ./).",
         ),
     ] = None,
     server: Annotated[

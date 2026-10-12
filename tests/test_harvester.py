@@ -80,6 +80,23 @@ def test_token_persistence_and_resolution(tmp_path: Path, monkeypatch) -> None:
     assert resolve_server_token(test_host, repo_root=tmp_path / "empty") == "env-ckan-token"
 
 
+def test_repo_root_env_variable_resolution(tmp_path: Path, monkeypatch) -> None:
+    test_host = "test-host.org"
+    token_file = tmp_path / test_host / ".api_token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("my-secret-token", "utf-8")
+
+    # With CKAN_REPOSITORY_ROOT
+    monkeypatch.setenv("CKAN_REPOSITORY_ROOT", str(tmp_path))
+    assert resolve_server_token(test_host) == "my-secret-token"
+
+    # With analyze_harvest_errors
+    manifest = tmp_path / test_host / ".manifest.json"
+    manifest.write_text('{"records": {}}', "utf-8")
+    analysis = analyze_harvest_errors(server=test_host)
+    assert analysis["total_errors"] == 0
+
+
 def test_server_harvester_manifest(tmp_path: Path) -> None:
     harvester = ServerHarvester("demo.ckan.org", tmp_path)
     assert harvester.manifest_file.exists() is False

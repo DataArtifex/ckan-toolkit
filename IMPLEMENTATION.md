@@ -49,7 +49,7 @@ The codebase is organized into modular layers:
   - Compares remote dataset state against local manifest records (`.manifest.json`).
   - Computes SHA-256 hashes of downloaded content to detect additions, updates, and unchanged datasets.
   - Detects deletions when datasets are removed from the remote catalog.
-  - Local file organization: `<repo_root>/<server_hostname>/<sanitized_pid>/metadata/<file_name>`.
+  - Local file organization: `<repo_root>/<server_hostname>/<sanitized_pid>/metadata/<file_name>` (resolved via `--repo-dir`, `DARTFX_CKAN_REPOSITORY`, `CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY`, or current working directory).
 - **Supported Formats**:
   - `json`: Standard CKAN package JSON (`.ckan.json`).
   - `dcat`: DCAT 2/3 RDF/XML (`.dcat.xml`).
