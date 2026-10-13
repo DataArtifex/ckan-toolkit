@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import requests_cache
 
+from dartfx.ckan.__about__ import __version__
 from dartfx.ckan.api import CKANAPIClient
 from dartfx.ckan.ckan import SearchParameters, ServerInstallation, fetch_ckan_installations
 from dartfx.ckan.exceptions import CKANAPIRequestError
@@ -258,7 +259,11 @@ class CKANServer:
 
         # Direct HTTP download for DCAT extensions if present
         clean_host = self.installation.clean_hostname
-        headers = {"User-Agent": "dartfx-ckan/0.1.0"}
+        headers = {
+            "User-Agent": (
+                f"Mozilla/5.0 (compatible; dartfx-ckan/{__version__}; +https://github.com/DataArtifex/dartfx-ckan)"
+            )
+        }
         if self.api_key:
             headers["Authorization"] = self.api_key
 

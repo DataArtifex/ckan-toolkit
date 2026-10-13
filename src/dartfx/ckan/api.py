@@ -7,6 +7,7 @@ from typing import Any
 
 from ckanapi import RemoteCKAN
 
+from dartfx.ckan.__about__ import __version__
 from dartfx.ckan.exceptions import CKANAPIRequestError, CKANConnectionError, CKANValidationError
 from dartfx.ckan.models import Dataset, Organization, ServerInfo, ServerStats
 
@@ -37,7 +38,10 @@ class CKANAPIClient:
             CKANConnectionError: If the RemoteCKAN client cannot be initialized.
         """
         try:
-            ua = user_agent or "dartfx-ckan/0.1.0 (https://github.com/DataArtifex/dartfx-ckan)"
+            ua = (
+                user_agent
+                or f"Mozilla/5.0 (compatible; dartfx-ckan/{__version__}; +https://github.com/DataArtifex/dartfx-ckan)"
+            )
             self._remote = remote_ckan or RemoteCKAN(server_url, apikey=api_key, user_agent=ua)
         except Exception as exc:  # pragma: no cover - defensive guard for constructor failures
             msg = f"Failed to initialize CKAN connection for '{server_url}': {exc}"

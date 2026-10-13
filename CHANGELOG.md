@@ -2,6 +2,8 @@
 
 ## [0.2.0]
 
+- Updated default `User-Agent` to `Mozilla/5.0 (compatible; dartfx-ckan/{version}; +https://github.com/DataArtifex/dartfx-ckan)` removing WAF/bot triggers (`Harvester`), and added automatic browser User-Agent fallback when servers return HTTP 403.
+- Updated `stats` command table to display the server hostname as an active clickable link (with automatic `http`/`https` fallback awareness) to open the portal homepage.
 - Aligned SSL/HTTP error message handling and diagnostics on the `nada-toolkit` implementation: added `abbreviate_error()`, enhanced `classify_harvest_error()` with SSL/TLS and network error categories, added parked/domain-for-sale detection (`_is_parked_or_domain_sale`), and added automatic HTTP fallback when HTTPS fails SSL verification in `stats` command.
 - Documented server compatibility, apex domain separation, Data.gov API restrictions, `status_show` hardening, and metadata standard requirements across `README.md`, `IMPLEMENTATION.md`, and Sphinx docs.
 - Added support for `DARTFX_CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY_ROOT`, and `CKAN_REPOSITORY` environment variables alongside `DARTFX_CKAN_REPOSITORY` for harvest, errors, and stats repository root resolution.

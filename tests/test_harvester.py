@@ -412,3 +412,37 @@ def test_fetch_server_stats_ssl_fallback(tmp_path: Path, monkeypatch) -> None:
     assert stats["scheme"] == "http"
     assert stats["datasets"] == 15
     assert stats["version"] == "2.9.7"
+
+
+def test_fetch_server_stats_waf_retry_browser_ua(tmp_path: Path, monkeypatch) -> None:
+    class DummyResponse:
+        def __init__(self, data: dict, status_code: int = 200) -> None:
+            self._data = data
+            self.status_code = status_code
+            self.text = json.dumps(data)
+
+        def json(self):
+            return self._data
+
+    def mock_get(url, headers=None, timeout=None):
+        del timeout
+        ua = (headers or {}).get("User-Agent", "")
+        # If bot UA without Chrome/Safari, simulate a WAF 403 block
+        if "Chrome" not in ua:
+            return DummyResponse({"error": "Forbidden"}, status_code=403)
+        if "status_show" in url:
+            return DummyResponse({"result": {"ckan_version": "2.6.9", "site_title": "Agri Portal"}})
+        if "package_search" in url:
+            return DummyResponse({"result": {"count": 13, "results": []}})
+        if "organization_list" in url:
+            return DummyResponse({"result": ["org1", "org2"]})
+        return DummyResponse({}, status_code=404)
+
+    monkeypatch.setattr("requests.get", mock_get)
+
+    stats = fetch_server_stats("dados.agricultura.gov.br", repo_root=tmp_path, refresh_cache=True)
+    assert stats["is_ckan"] is True
+    assert stats["datasets"] == 13
+    assert stats["organizations"] == 2
+    assert stats["version"] == "2.6.9"
+    assert stats["error"] is None

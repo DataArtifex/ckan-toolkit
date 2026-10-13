@@ -398,15 +398,16 @@ class ServerInstallation(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Derive country_code, clean hostname, and scheme if not provided."""
+        if self.about_url and self.about_url.lower().startswith("http://"):
+            self.scheme = "http"
+        elif self.hostname and self.hostname.lower().startswith("http://"):
+            self.scheme = "http"
+
         if self.hostname:
-            if self.hostname.lower().startswith("http://"):
-                self.scheme = "http"
             clean = self.hostname.replace("https://", "").replace("http://", "").strip("/")
             if "/" in clean:
                 clean = clean.split("/", 1)[0]
             self.hostname = clean
-        elif self.about_url and self.about_url.lower().startswith("http://"):
-            self.scheme = "http"
 
         if not self.country_code and self.country:
             self.country_code = get_iso2_code(self.country)
@@ -435,6 +436,8 @@ class ServerInstallation(BaseModel):
     @property
     def url(self) -> str:
         """Return URL for the installation."""
+        if self.about_url and (self.about_url.startswith("http://") or self.about_url.startswith("https://")):
+            return self.about_url.rstrip("/")
         if not self.clean_hostname:
             return ""
         return f"{self.scheme}://{self.clean_hostname}"

@@ -170,7 +170,7 @@ def normalize_formats(formats_input: str | list[str] | None) -> list[str]:
 
 
 DEFAULT_REQUEST_HEADERS: dict[str, str] = {
-    "User-Agent": f"dartfx-ckan/{__version__} (Research Harvester; +https://github.com/DataArtifex/dartfx-ckan)",
+    "User-Agent": f"Mozilla/5.0 (compatible; dartfx-ckan/{__version__}; +https://github.com/DataArtifex/dartfx-ckan)",
     "Accept": "application/json, text/plain, */*",
 }
 
@@ -1006,6 +1006,52 @@ def _probe_ckan_url(
                 except Exception:
                     pass
 
+        # If not CKAN and any probe returned 403 (WAF / anti-bot), retry with standard browser User-Agent
+        if not res["is_ckan"] and any(r is not None and r.status_code == 403 for r in [r_search, r_status, r_org]):
+            try:
+                browser_h = dict(headers)
+                browser_h["User-Agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+                search_q = urllib.parse.quote(query) if query else "*:*"
+                r_b_search = requests.get(
+                    f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
+                    headers=browser_h,
+                    timeout=timeout,
+                )
+                if r_b_search.status_code == 200:
+                    res["is_ckan"] = True
+                    res["error"] = None
+                    try:
+                        res["datasets"] = r_b_search.json().get("result", {}).get("count", 0)
+                    except Exception:
+                        pass
+                    try:
+                        r_b_status = requests.get(
+                            f"{base_url}/api/3/action/status_show",
+                            headers=browser_h,
+                            timeout=timeout,
+                        )
+                        if r_b_status.status_code == 200:
+                            s_res = r_b_status.json().get("result", {})
+                            res["version"] = s_res.get("ckan_version") or s_res.get("installed_version")
+                            res["site_title"] = s_res.get("site_title")
+                    except Exception:
+                        pass
+                    try:
+                        r_b_org = requests.get(
+                            f"{base_url}/api/3/action/organization_list",
+                            headers=browser_h,
+                            timeout=timeout,
+                        )
+                        if r_b_org.status_code == 200:
+                            res["organizations"] = len(r_b_org.json().get("result", []))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         # If not CKAN and no error yet, check status codes
         if not res["is_ckan"] and not res["error"]:
             for r_probe in [r_search, r_status, r_org]:
@@ -1173,7 +1219,7 @@ def display_server_stats(
         header_style="bold cyan",
         show_header=True,
     )
-    table.add_column("Repository / Server", style="white")
+    table.add_column("Server", style="cyan", no_wrap=True)
     table.add_column("Country", style="green", justify="center")
     table.add_column("Ver", style="dim", justify="center")
     table.add_column("Datasets", justify="right", style="cyan")
@@ -1229,8 +1275,14 @@ def display_server_stats(
                 if stat.get("error") == "Interrupted":
                     continue
                 progress.update(task_id, advance=1, server=inst.clean_hostname or "")
-                name_disp = inst.name or inst.clean_hostname
-                clickable_host = f"[link={inst.url}]{name_disp}[/link]" if inst.url else name_disp
+                server_disp = inst.clean_hostname or inst.name or "N/A"
+                home_url = inst.url
+                if stat.get("http_fallback") and home_url.startswith("https://"):
+                    home_url = "http://" + home_url[len("https://") :]
+                elif stat.get("https_available") and home_url.startswith("http://"):
+                    home_url = "https://" + home_url[len("http://") :]
+
+                clickable_host = f"[link={home_url}]{server_disp}[/link]" if home_url else server_disp
                 cc = inst.country_code or "-"
                 ver_disp = format_version(stat.get("version") or inst.version)
                 is_ckan = bool(stat.get("is_ckan"))
