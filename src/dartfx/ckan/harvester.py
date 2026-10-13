@@ -1052,18 +1052,30 @@ def _probe_ckan_url(
             except Exception:
                 pass
 
-        # If not CKAN and no error yet, check status codes
+        # If not CKAN and no error yet, check status codes and bot protection signatures
         if not res["is_ckan"] and not res["error"]:
             for r_probe in [r_search, r_status, r_org]:
-                if r_probe is not None and r_probe.status_code == 403:
+                if r_probe is not None:
+                    p_text = r_probe.text.lower() if r_probe.text else ""
                     if any(
-                        k in r_probe.text.lower()
-                        for k in ["cloudflare", "just a moment", "challenge-platform", "waf", "ddos-guard"]
+                        k in p_text
+                        for k in [
+                            "cloudflare",
+                            "just a moment",
+                            "challenge-platform",
+                            "waf",
+                            "ddos-guard",
+                            "making sure you're not a bot",
+                            "pardon our interruption",
+                            "bot detection",
+                            "anubis",
+                        ]
                     ):
                         res["error"] = "Bot Protection (WAF)"
-                    else:
+                        break
+                    elif r_probe.status_code == 403:
                         res["error"] = "Forbidden (403)"
-                    break
+                        break
             if not res["error"]:
                 res["error"] = "Not a CKAN server"
 
@@ -1107,9 +1119,13 @@ def fetch_server_stats(
 ) -> dict[str, Any]:
     """Retrieve counts of datasets, organizations, version and latency for a CKAN server with 24h cache."""
     is_explicit_http = host.lower().startswith("http://")
-    clean_host = host.replace("https://", "").replace("http://", "").strip("/")
-    if "/" in clean_host:
-        clean_host = clean_host.split("/", 1)[0]
+    stripped_host = host.replace("https://", "").replace("http://", "").strip("/")
+    if "/" in stripped_host:
+        clean_host, subpath_part = stripped_host.split("/", 1)
+        subpath = "/" + subpath_part.rstrip("/")
+    else:
+        clean_host = stripped_host
+        subpath = ""
     headers = get_request_headers(host=clean_host, api_token=api_token, repo_root=repo_root)
 
     env_repo = (
@@ -1138,9 +1154,17 @@ def fetch_server_stats(
             pass
 
     primary_scheme = "http" if is_explicit_http else "https"
-    primary_url = f"{primary_scheme}://{clean_host}"
+    primary_url = f"{primary_scheme}://{clean_host}{subpath}"
 
     stats = _probe_ckan_url(primary_url, clean_host, headers, timeout, query=query)
+    # If root returned not CKAN and no subpath was requested, check common /data subpath
+    if not stats.get("is_ckan") and not subpath and not stats.get("is_ssl_error"):
+        sub_url = f"{primary_scheme}://{clean_host}/data"
+        sub_stats = _probe_ckan_url(sub_url, clean_host, headers, timeout=min(timeout, 5), query=query)
+        if sub_stats.get("is_ckan"):
+            stats = sub_stats
+            stats["subpath"] = "/data"
+
     stats["server"] = clean_host
     stats["scheme"] = primary_scheme
 
@@ -1240,7 +1264,7 @@ def display_server_stats(
         return str(val)
 
     def _query_stat(inst: ServerInstallation) -> tuple[ServerInstallation, dict[str, Any]]:
-        host_to_query = inst.url if inst.scheme == "http" else inst.clean_hostname
+        host_to_query = inst.url if inst.url else (inst.clean_hostname or "")
         s = fetch_server_stats(
             host=host_to_query,
             query=query,
