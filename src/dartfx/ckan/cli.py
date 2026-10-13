@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -473,6 +474,20 @@ def stats(
             help="Number of concurrent worker threads for querying servers (default: 8).",
         ),
     ] = 8,
+    repo_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--repo-dir",
+            "-d",
+            envvar=[
+                "DARTFX_CKAN_REPOSITORY_ROOT",
+                "DARTFX_CKAN_REPOSITORY",
+                "CKAN_REPOSITORY_ROOT",
+                "CKAN_REPOSITORY",
+            ],
+            help="Repository storage root directory (defaults to CKAN_REPOSITORY_ROOT or .cache).",
+        ),
+    ] = None,
 ) -> None:
     """Display live dataset and organization counts for CKAN servers."""
     from dartfx.ckan.harvester import display_server_stats
@@ -486,6 +501,7 @@ def stats(
         cache_ttl_hours=float(cache_ttl),
         timeout=timeout,
         workers=workers,
+        repo_root=Path(repo_dir) if repo_dir else None,
     )
 
 

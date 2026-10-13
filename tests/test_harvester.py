@@ -87,6 +87,12 @@ def test_repo_root_env_variable_resolution(tmp_path: Path, monkeypatch) -> None:
     token_file.parent.mkdir(parents=True)
     token_file.write_text("my-secret-token", "utf-8")
 
+    # Clear potentially set environment variables from user or .env
+    monkeypatch.delenv("DARTFX_CKAN_REPOSITORY_ROOT", raising=False)
+    monkeypatch.delenv("DARTFX_CKAN_REPOSITORY", raising=False)
+    monkeypatch.delenv("CKAN_REPOSITORY_ROOT", raising=False)
+    monkeypatch.delenv("CKAN_REPOSITORY", raising=False)
+
     # With CKAN_REPOSITORY_ROOT
     monkeypatch.setenv("CKAN_REPOSITORY_ROOT", str(tmp_path))
     assert resolve_server_token(test_host) == "my-secret-token"
@@ -104,6 +110,10 @@ def test_repo_root_env_variable_resolution(tmp_path: Path, monkeypatch) -> None:
     manifest.write_text('{"records": {}}', "utf-8")
     analysis = analyze_harvest_errors(server=test_host)
     assert analysis["total_errors"] == 0
+
+    # With fetch_server_stats
+    fetch_server_stats(test_host, refresh_cache=False)
+    assert (alt_path / test_host / ".stats_cache.json").exists()
 
 
 def test_server_harvester_manifest(tmp_path: Path) -> None:
@@ -268,3 +278,38 @@ def test_fetch_server_stats_concurrent_probe(tmp_path: Path, monkeypatch) -> Non
     assert stats["datasets"] == 42
     assert stats["organizations"] == 3
     assert stats["error"] is None
+
+
+def test_fetch_server_stats_shutdown_handling(tmp_path: Path, monkeypatch) -> None:
+    # When RuntimeError('cannot schedule new futures after interpreter shutdown') occurs
+    def mock_get_shutdown(*_args, **_kwargs):
+        raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+    monkeypatch.setattr("requests.get", mock_get_shutdown)
+
+    stats = fetch_server_stats("shutdown.ckan.org", repo_root=tmp_path, refresh_cache=True)
+    assert stats["error"] == "Interrupted"
+    # Ensure this error is NOT written to cache
+    cache_file = tmp_path / "shutdown.ckan.org" / ".stats_cache.json"
+    assert not cache_file.exists()
+
+    # If a cache file previously contained an interpreter shutdown error, it should be ignored
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(
+        json.dumps(
+            {
+                "server": "shutdown.ckan.org",
+                "cached_at": datetime.now(UTC).isoformat(),
+                "error": "cannot schedule new futures after interpreter shutdown",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # With requests.get working again
+    monkeypatch.setattr(
+        "requests.get",
+        lambda *_args, **_kwargs: type("Resp", (), {"status_code": 404, "json": lambda _self: {}})(),
+    )
+    stats2 = fetch_server_stats("shutdown.ckan.org", repo_root=tmp_path, refresh_cache=False)
+    # Should not use the corrupted cached entry
+    assert stats2.get("cached") is not True

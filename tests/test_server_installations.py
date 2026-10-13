@@ -110,3 +110,5 @@ def test_cli_stats_command_flags() -> None:
     assert "--workers" in clean_output
     assert "--threads" in clean_output
     assert "-w" in clean_output
+    assert "--repo-dir" in clean_output
+    assert "-d" in clean_output

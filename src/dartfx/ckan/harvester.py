@@ -669,7 +669,13 @@ def fetch_server_stats(
     base_url = f"https://{clean_host}"
     headers = get_request_headers(host=clean_host, api_token=api_token, repo_root=repo_root)
 
-    target_repo = repo_root or Path.cwd() / ".cache"
+    env_repo = (
+        os.environ.get("DARTFX_CKAN_REPOSITORY_ROOT")
+        or os.environ.get("DARTFX_CKAN_REPOSITORY")
+        or os.environ.get("CKAN_REPOSITORY_ROOT")
+        or os.environ.get("CKAN_REPOSITORY")
+    )
+    target_repo = repo_root or (Path(env_repo) if env_repo else (Path.cwd() / ".cache"))
     cache_file = target_repo / clean_host / ".stats_cache.json"
 
     if cache_file.exists() and not refresh_cache:
@@ -681,8 +687,10 @@ def fetch_server_stats(
                     dt = datetime.fromisoformat(cached_at_str)
                     age_hours = (datetime.now(UTC) - dt).total_seconds() / 3600.0
                     if age_hours < cache_ttl_hours:
-                        cdata["cached"] = True
-                        return cdata
+                        cached_err = str(cdata.get("error") or "").lower()
+                        if "interpreter shutdown" not in cached_err and "interrupted" not in cached_err:
+                            cdata["cached"] = True
+                            return cdata
         except Exception:
             pass
 
@@ -720,51 +728,57 @@ def fetch_server_stats(
                 timeout=timeout,
             )
 
-        with ThreadPoolExecutor(max_workers=3) as probe_executor:
-            f_status = probe_executor.submit(_probe_status)
-            f_search = probe_executor.submit(_probe_search)
-            f_orgs = probe_executor.submit(_probe_orgs)
+        try:
+            with ThreadPoolExecutor(max_workers=3) as probe_executor:
+                f_status = probe_executor.submit(_probe_status)
+                f_search = probe_executor.submit(_probe_search)
+                f_orgs = probe_executor.submit(_probe_orgs)
 
-            # 1. Probe status_show
-            try:
-                r_status = f_status.result()
-                if r_status.status_code == 200:
-                    stats["is_ckan"] = True
-                    s_json = r_status.json()
-                    res = s_json.get("result", {})
-                    stats["version"] = res.get("ckan_version") or res.get("installed_version")
-                    stats["site_title"] = res.get("site_title")
-                elif r_status.status_code == 401:
-                    stats["is_ckan"] = True
-                    stats["requires_token"] = True
-            except Exception:
-                pass
-
-            # 2. Probe package_search for dataset count
-            r_search = f_search.result()
-            if r_search.status_code == 200:
-                stats["is_ckan"] = True
+                # 1. Probe status_show
                 try:
-                    s_data = r_search.json()
-                    res = s_data.get("result", {})
-                    stats["datasets"] = res.get("count", 0)
+                    r_status = f_status.result()
+                    if r_status.status_code == 200:
+                        stats["is_ckan"] = True
+                        s_json = r_status.json()
+                        res = s_json.get("result", {})
+                        stats["version"] = res.get("ckan_version") or res.get("installed_version")
+                        stats["site_title"] = res.get("site_title")
+                    elif r_status.status_code == 401:
+                        stats["is_ckan"] = True
+                        stats["requires_token"] = True
                 except Exception:
                     pass
-            elif r_search.status_code == 401:
-                stats["is_ckan"] = True
-                stats["requires_token"] = True
 
-            # 3. Probe organization_list
-            try:
-                r_org = f_orgs.result()
-                if r_org.status_code == 200:
+                # 2. Probe package_search for dataset count
+                r_search = f_search.result()
+                if r_search.status_code == 200:
                     stats["is_ckan"] = True
-                    org_data = r_org.json()
-                    res = org_data.get("result", [])
-                    if isinstance(res, list):
-                        stats["organizations"] = len(res)
-            except Exception:
-                pass
+                    try:
+                        s_data = r_search.json()
+                        res = s_data.get("result", {})
+                        stats["datasets"] = res.get("count", 0)
+                    except Exception:
+                        pass
+                elif r_search.status_code == 401:
+                    stats["is_ckan"] = True
+                    stats["requires_token"] = True
+
+                # 3. Probe organization_list
+                try:
+                    r_org = f_orgs.result()
+                    if r_org.status_code == 200:
+                        stats["is_ckan"] = True
+                        org_data = r_org.json()
+                        res = org_data.get("result", [])
+                        if isinstance(res, list):
+                            stats["organizations"] = len(res)
+                except Exception:
+                    pass
+        except RuntimeError as re:
+            if "interpreter shutdown" in str(re).lower():
+                stats["error"] = "Interrupted"
+                return stats
+            raise
 
         stats["latency_seconds"] = round(time.time() - t0, 2)
 
@@ -773,9 +787,17 @@ def fetch_server_stats(
         stats["error"] = f"Timeout ({timeout}s)"
     except Exception as e:
         stats["latency_seconds"] = round(time.time() - t0, 2)
-        stats["error"] = str(e)
+        err_msg = str(e)
+        if "interpreter shutdown" in err_msg.lower():
+            stats["error"] = "Interrupted"
+            return stats
+        stats["error"] = err_msg
 
-    # Cache results
+    # Cache results (never cache transient shutdown or interruption errors)
+    err_str = str(stats.get("error") or "").lower()
+    if "interpreter shutdown" in err_str or "interrupted" in err_str:
+        return stats
+
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         stats_to_save = dict(stats)
@@ -847,13 +869,16 @@ def display_server_stats(
         transient=True,
     )
 
-    with progress:
-        task_id = progress.add_task("Querying CKAN servers...", total=len(installations), server="")
-        max_workers = max(1, min(workers, len(installations)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    max_workers = max(1, min(workers, len(installations)))
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        with progress:
+            task_id = progress.add_task("Querying CKAN servers...", total=len(installations), server="")
             futures = [executor.submit(_query_stat, inst) for inst in installations]
             for future in as_completed(futures):
                 inst, stat = future.result()
+                if stat.get("error") == "Interrupted":
+                    continue
                 progress.update(task_id, advance=1, server=inst.clean_hostname or "")
                 name_disp = inst.name or inst.clean_hostname
                 clickable_host = f"[link={inst.url}]{name_disp}[/link]" if inst.url else name_disp
@@ -879,6 +904,14 @@ def display_server_stats(
                     status_text = "[green]Online[/green]"
 
                 table.add_row(clickable_host, cc, ver_disp, datasets_disp, orgs_disp, lat_badge, status_text)
+    except (KeyboardInterrupt, SystemExit):
+        executor.shutdown(wait=False, cancel_futures=True)
+        console.print("\n[yellow]Querying cancelled by user (Ctrl-C).[/yellow]")
+        if table.rows:
+            console.print(table)
+        return
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     console.print(table)
 
