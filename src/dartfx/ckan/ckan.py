@@ -394,14 +394,19 @@ class ServerInstallation(BaseModel):
     contact_email: str | None = None
     about_url: str | None = None
     id: str | None = None
+    scheme: str = "https"
 
     def model_post_init(self, __context: Any) -> None:
-        """Derive country_code and clean hostname if not provided."""
+        """Derive country_code, clean hostname, and scheme if not provided."""
         if self.hostname:
+            if self.hostname.lower().startswith("http://"):
+                self.scheme = "http"
             clean = self.hostname.replace("https://", "").replace("http://", "").strip("/")
             if "/" in clean:
                 clean = clean.split("/", 1)[0]
             self.hostname = clean
+        elif self.about_url and self.about_url.lower().startswith("http://"):
+            self.scheme = "http"
 
         if not self.country_code and self.country:
             self.country_code = get_iso2_code(self.country)
@@ -429,10 +434,10 @@ class ServerInstallation(BaseModel):
 
     @property
     def url(self) -> str:
-        """Return HTTPS URL for the installation."""
+        """Return URL for the installation."""
         if not self.clean_hostname:
             return ""
-        return f"https://{self.clean_hostname}"
+        return f"{self.scheme}://{self.clean_hostname}"
 
 
 CKAN_DIRECTORY_URLS: list[str] = []

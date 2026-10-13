@@ -24,6 +24,7 @@ from .exceptions import (
 )
 from .harvester import (
     ServerHarvester,
+    abbreviate_error,
     analyze_harvest_errors,
     classify_harvest_error,
     display_server_stats,
@@ -62,6 +63,7 @@ __all__ = [
     "ServerStats",
     "Tag",
     "ServerHarvester",
+    "abbreviate_error",
     "analyze_harvest_errors",
     "classify_harvest_error",
     "display_server_stats",

@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from dartfx.ckan.cli import app
 from dartfx.ckan.harvester import (
     ServerHarvester,
+    abbreviate_error,
     analyze_harvest_errors,
     classify_harvest_error,
     fetch_server_stats,
@@ -140,7 +141,65 @@ def test_classify_harvest_error() -> None:
     assert classify_harvest_error("Cloudflare WAF Blocked") == "HTTP 403: Forbidden / Bot Protection (WAF)"
     assert classify_harvest_error("Exporter Not Found on server") == "Exporter Not Supported on Server"
     assert classify_harvest_error("Connection timeout") == "Request Timeout"
+    assert (
+        classify_harvest_error("certificate verify failed: certificate has expired")
+        == "Network: SSL Certificate Expired"
+    )
+    assert (
+        classify_harvest_error("Hostname mismatch: certificate is not valid for 'ckan.org'")
+        == "Network: SSL Hostname Mismatch"
+    )
+    assert (
+        classify_harvest_error("certificate verify failed: self-signed certificate")
+        == "Network: SSL Self-Signed Certificate"
+    )
+    assert (
+        classify_harvest_error(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: UNEXPECTED_EOF_WHILE_READING"
+        )
+        == "Network: SSL Handshake Failed (Unexpected EOF)"
+    )
     assert classify_harvest_error(None) == "Unknown Error"
+
+
+def test_abbreviate_error() -> None:
+    wrapped_ssl_err = (
+        "HTTPSConnectionPool(host='ckanprod-alma.ucar.edu', port=443): Max retries exceeded "
+        "with url: /api/3/action/status_show (Caused by SSLError(SSLError(1, "
+        "'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: UNEXPECTED_EOF_WHILE_READING (_ssl.c:1000)')))"
+    )
+    assert abbreviate_error(wrapped_ssl_err) == "SSL Handshake Failed"
+
+    wrapped_mismatch = (
+        "HTTPSConnectionPool(host='data.example.org', port=443): Max retries exceeded "
+        "with url: /api/3/action/status_show (Caused by SSLError(SSLCertVerificationError(1, "
+        '"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Hostname mismatch, '
+        "certificate is not valid for 'data.example.org'. (_ssl.c:1010)\")))"
+    )
+    assert abbreviate_error(wrapped_mismatch) == "SSL Hostname Mismatch"
+
+    assert (
+        abbreviate_error("HTTPSConnectionPool(host='ckanprod-alma.ucar.edu', port=443): Max retries exceeded")
+        == "Connection Failure"
+    )
+    assert abbreviate_error("[SSL: CERTIFICATE_VERIFY_FAILED]") == "SSL Certificate Error"
+    assert abbreviate_error("UNEXPECTED_EOF_WHILE_READING") == "SSL Handshake Failed"
+    assert abbreviate_error("Timeout (10s)") == "Timeout (10s)"
+    assert abbreviate_error("Connection timed out (ReadTimeout)") == "Request Timeout"
+    assert abbreviate_error("Connection refused") == "Connection Refused"
+    assert abbreviate_error("certificate has expired") == "SSL Certificate Expired"
+    assert abbreviate_error("unable to get local issuer certificate") == "SSL Incomplete Chain"
+    assert abbreviate_error("self-signed certificate") == "SSL Self-Signed Cert"
+    assert abbreviate_error("nodename nor servname provided, or not known") == "DNS Resolution Failure"
+    assert abbreviate_error("HTTP 401: Unauthorized") == "Auth Required (401)"
+    assert abbreviate_error("HTTP 403: Forbidden") == "Forbidden (403)"
+    assert abbreviate_error("Cloudflare challenge") == "Bot Protection (WAF)"
+    assert abbreviate_error("HTTP 404: Not Found") == "Not Found (404)"
+    assert abbreviate_error("HTTP 500: Server Error") == "Server Error (500)"
+    assert abbreviate_error("HTTP 502: Bad Gateway") == "Bad Gateway (502)"
+    assert abbreviate_error("HugeDomains.com is for sale") == "Domain For Sale"
+    assert abbreviate_error("Not a CKAN server") == "Not CKAN Server"
+    assert abbreviate_error(None) == "Unknown Error"
 
 
 def test_analyze_and_render_harvest_errors(tmp_path: Path) -> None:
@@ -313,3 +372,43 @@ def test_fetch_server_stats_shutdown_handling(tmp_path: Path, monkeypatch) -> No
     stats2 = fetch_server_stats("shutdown.ckan.org", repo_root=tmp_path, refresh_cache=False)
     # Should not use the corrupted cached entry
     assert stats2.get("cached") is not True
+
+
+def test_fetch_server_stats_ssl_fallback(tmp_path: Path, monkeypatch) -> None:
+    import requests
+
+    class DummyResponse:
+        def __init__(self, data: dict, status_code: int = 200) -> None:
+            self._data = data
+            self.status_code = status_code
+
+        def json(self):
+            return self._data
+
+    def mock_get(url, headers=None, timeout=None):
+        del headers, timeout
+        if url.startswith("https://"):
+            raise requests.exceptions.SSLError(
+                "HTTPSConnectionPool(host='ssl-fail.ckan.org', port=443): Max retries exceeded "
+                "(Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] "
+                "certificate verify failed: Hostname mismatch')))"
+            )
+        if url.startswith("http://"):
+            if "status_show" in url:
+                return DummyResponse({"result": {"ckan_version": "2.9.7", "site_title": "HTTP Fallback Portal"}})
+            if "package_search" in url:
+                return DummyResponse({"result": {"count": 15, "results": []}})
+            if "organization_list" in url:
+                return DummyResponse({"result": ["org1"]})
+        return DummyResponse({}, status_code=404)
+
+    monkeypatch.setattr("requests.get", mock_get)
+
+    stats = fetch_server_stats("ssl-fail.ckan.org", repo_root=tmp_path, refresh_cache=True)
+    assert stats["is_ckan"] is True
+    assert stats["http_fallback"] is True
+    assert stats["ssl_error"] == "SSL Hostname Mismatch"
+    assert stats["error"] is None
+    assert stats["scheme"] == "http"
+    assert stats["datasets"] == 15
+    assert stats["version"] == "2.9.7"

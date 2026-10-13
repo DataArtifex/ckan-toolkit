@@ -396,27 +396,192 @@ def classify_harvest_error(reason: str | None) -> str:
         return "HTTP 422: Unprocessable Entity"
 
     # 7. Server Errors
-    if any(k in r_low for k in ["500", "502", "503", "504", "internal server error", "bad gateway"]):
+    if any(
+        k in r_low
+        for k in [
+            "500",
+            "502",
+            "503",
+            "504",
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+        ]
+    ):
         return "HTTP 5xx: Server Error"
 
     # 8. Rate Limiting
     if "429" in r_low or "rate limit" in r_low or "too many requests" in r_low:
         return "HTTP 429: Rate Limited"
 
-    # 9. Timeouts & Connection
-    if "timeout" in r_low:
-        return "Request Timeout"
-    if any(k in r_low for k in ["connection refused", "failed to establish", "connection error", "name resolution"]):
-        return "Network / Connection Error"
+    # 9. SSL / TLS Diagnostics (checked before generic network errors)
+    if "ssl" in r_low or "certificate" in r_low:
+        if (
+            "unable to get local issuer certificate" in r_low
+            or "unable to verify the first certificate" in r_low
+            or "missing intermediate" in r_low
+            or "incomplete chain" in r_low
+        ):
+            return "Network: SSL Incomplete Chain (Missing Intermediate CA)"
+        if "expired" in r_low:
+            return "Network: SSL Certificate Expired"
+        if "hostname" in r_low and ("mismatch" in r_low or "doesn't match" in r_low or "not valid" in r_low):
+            return "Network: SSL Hostname Mismatch"
+        if "self-signed" in r_low or "self signed" in r_low:
+            return "Network: SSL Self-Signed Certificate"
+        if "unexpected_eof" in r_low or "unexpected eof" in r_low or "eof occurred" in r_low:
+            return "Network: SSL Handshake Failed (Unexpected EOF)"
+        return "Network: SSL / TLS Certificate Error"
 
-    # 10. Parsing
-    if any(k in r_low for k in ["jsondecodeerror", "xml syntax", "parse error", "invalid json"]):
+    # 10. Timeouts & Connection
+    if any(k in r_low for k in ["timeout", "timed out", "connecttimeout", "readtimeout"]):
+        return "Request Timeout"
+    if any(
+        k in r_low
+        for k in [
+            "connection refused",
+            "connection error",
+            "max retries exceeded",
+            "failed to establish a new connection",
+            "nameresolutionerror",
+            "getaddrinfo failed",
+            "nodename nor servname",
+            "name or service not known",
+            "remotedisconnected",
+        ]
+    ):
+        return "Network: Connection Failure"
+
+    # 11. Parsing
+    if any(
+        k in r_low
+        for k in [
+            "parseerror",
+            "jsondecodeerror",
+            "syntaxerror",
+            "xml.etree",
+            "xml syntax",
+            "invalid xml",
+            "invalid json",
+        ]
+    ):
         return "JSON / XML Parsing Error"
 
     if "empty metadata response" in r_low:
         return "Empty Metadata Response (0 bytes)"
 
     return "Unknown Error"
+
+
+def abbreviate_error(reason: str | None) -> str:
+    """Format a verbose error or exception string into a concise label for CLI table display."""
+    if not reason:
+        return "Unknown Error"
+    r_low = reason.lower()
+
+    # 0. Domain Parked / Expired / For Sale or Not CKAN
+    if any(k in r_low for k in ["hugedomains", "for sale", "domain expired", "domain parked", "parked domain"]):
+        return "Domain For Sale"
+    if "not a ckan server" in r_low or "not ckan server" in r_low or "not ckan" in r_low:
+        return "Not CKAN Server"
+
+    # 1. SSL / TLS Diagnostics
+    if (
+        "ssl" in r_low
+        or "certificate" in r_low
+        or "cert" in r_low
+        or "unexpected_eof" in r_low
+        or "eof occurred" in r_low
+    ):
+        if "hostname" in r_low and ("mismatch" in r_low or "doesn't match" in r_low or "not valid" in r_low):
+            return "SSL Hostname Mismatch"
+        if "expired" in r_low:
+            return "SSL Certificate Expired"
+        if "self-signed" in r_low or "self signed" in r_low:
+            return "SSL Self-Signed Cert"
+        if (
+            "unable to get local issuer certificate" in r_low
+            or "unable to verify the first certificate" in r_low
+            or "missing intermediate" in r_low
+            or "incomplete chain" in r_low
+        ):
+            return "SSL Incomplete Chain"
+        if "unexpected_eof" in r_low or "unexpected eof" in r_low or "eof occurred" in r_low:
+            return "SSL Handshake Failed"
+        return "SSL Certificate Error"
+
+    # 2. Timeout (preserve concise format like "Timeout (10s)" if already present)
+    m = re.search(r"timeout\s*\(\d+s\)", reason, re.IGNORECASE)
+    if m:
+        return m.group(0).capitalize()
+    if any(k in r_low for k in ["timeout", "timed out", "connecttimeout", "readtimeout"]):
+        return "Request Timeout"
+
+    # 3. DNS / Name Resolution
+    if any(
+        k in r_low
+        for k in ["nameresolutionerror", "getaddrinfo failed", "nodename nor servname", "name or service not known"]
+    ):
+        return "DNS Resolution Failure"
+
+    # 4. Connection Failures
+    if "connection refused" in r_low:
+        return "Connection Refused"
+    if "connection reset" in r_low:
+        return "Connection Reset"
+    if any(
+        k in r_low
+        for k in [
+            "connection error",
+            "max retries exceeded",
+            "failed to establish a new connection",
+            "remotedisconnected",
+        ]
+    ):
+        return "Connection Failure"
+
+    # 5. Authentication / Forbidden
+    if "401" in r_low or "unauthorized" in r_low:
+        return "Auth Required (401)"
+    if any(k in r_low for k in ["cloudflare", "bot protection", "waf", "captcha", "ddos-guard", "incapsula"]):
+        return "Bot Protection (WAF)"
+    if "403" in r_low or "forbidden" in r_low:
+        return "Forbidden (403)"
+
+    # 6. HTTP Status Codes
+    if "404" in r_low or "not found" in r_low:
+        return "Not Found (404)"
+    if "500" in r_low or "internal server error" in r_low:
+        return "Server Error (500)"
+    if "502" in r_low or "bad gateway" in r_low:
+        return "Bad Gateway (502)"
+    if "503" in r_low or "service unavailable" in r_low:
+        return "Service Unavailable (503)"
+    if "504" in r_low or "gateway timeout" in r_low:
+        return "Gateway Timeout (504)"
+    if any(k in r_low for k in ["5xx", "server error"]):
+        return "Server Error (5xx)"
+
+    # 7. Parse Errors
+    if any(k in r_low for k in ["parseerror", "jsondecodeerror", "syntaxerror", "malformed"]):
+        return "Malformed Response"
+
+    # 8. Short clean string or fallback
+    clean = reason.strip()
+    if len(clean) <= 28 and not any(
+        x in r_low for x in ["httpconnection", "httpsconnection", "traceback", "caused by", "socket"]
+    ):
+        return clean
+
+    classified = classify_harvest_error(reason)
+    if classified.startswith("Network: "):
+        return classified[len("Network: ") :]
+    if classified.startswith("HTTP "):
+        return classified
+    if classified != "Unknown Error":
+        return classified
+
+    return "Connection Failure"
 
 
 def analyze_harvest_errors(
@@ -653,6 +818,238 @@ def format_response_latency(
         return f"[bold red]🔴 {lat:.1f}s[/bold red]"
 
 
+def _is_parked_or_domain_sale(orig_host: str, resp: requests.Response) -> bool:
+    """Check if the response indicates the domain has expired, is parked, or is up for sale."""
+    raw_url = getattr(resp, "url", None)
+    if not isinstance(raw_url, str) or not raw_url:
+        return False
+
+    final_url = raw_url.lower()
+    final_host = (urllib.parse.urlparse(raw_url).hostname or "").lower()
+
+    parking_domains = [
+        "hugedomains",
+        "dan.com",
+        "sedo.com",
+        "sedoparking",
+        "godaddy",
+        "afternic",
+        "parkingcrew",
+        "bodis",
+        "domainmarket",
+        "namecheap",
+    ]
+    if any(p in final_url for p in parking_domains):
+        return True
+
+    # Check for domain mismatch on HTTP redirect
+    history = getattr(resp, "history", None)
+    if history and isinstance(history, list) and final_host:
+        orig_clean = orig_host.lower().strip()
+        orig_parts = orig_clean.split(".")
+        final_parts = final_host.split(".")
+        orig_base = ".".join(orig_parts[-2:]) if len(orig_parts) >= 2 else orig_clean
+        final_base = ".".join(final_parts[-2:]) if len(final_parts) >= 2 else final_host
+        if orig_base != final_base:
+            headers = getattr(resp, "headers", {})
+            ct = headers.get("content-type", "") if isinstance(headers, dict) else ""
+            if "text/html" in str(ct).lower():
+                raw_text = getattr(resp, "text", "")
+                content_low = raw_text[:3000].lower() if isinstance(raw_text, str) else ""
+                sale_keywords = [
+                    "domain is for sale",
+                    "buy this domain",
+                    "domain has expired",
+                    "parked free",
+                    "domain parking",
+                    "domain name may be for sale",
+                    "inquire about this domain",
+                ]
+                if any(k in content_low for k in sale_keywords):
+                    return True
+                return True
+
+    return False
+
+
+def _probe_ckan_url(
+    base_url: str,
+    clean_host: str,
+    headers: dict[str, str],
+    timeout: int,
+    query: str | None = None,
+) -> dict[str, Any]:
+    """Probe a single base URL (http or https) for CKAN API endpoints."""
+    res: dict[str, Any] = {
+        "is_ckan": False,
+        "datasets": 0,
+        "organizations": 0,
+        "groups": 0,
+        "version": None,
+        "site_title": None,
+        "requires_token": False,
+        "error": None,
+        "is_ssl_error": False,
+        "latency_seconds": None,
+    }
+    t0 = time.time()
+    try:
+
+        def _probe_status() -> requests.Response:
+            return requests.get(f"{base_url}/api/3/action/status_show", headers=headers, timeout=timeout)
+
+        def _probe_search() -> requests.Response:
+            search_q = urllib.parse.quote(query) if query else "*:*"
+            return requests.get(
+                f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
+                headers=headers,
+                timeout=timeout,
+            )
+
+        def _probe_orgs() -> requests.Response:
+            return requests.get(
+                f"{base_url}/api/3/action/organization_list",
+                headers=headers,
+                timeout=timeout,
+            )
+
+        r_status: requests.Response | None = None
+        r_search: requests.Response | None = None
+        r_org: requests.Response | None = None
+
+        with ThreadPoolExecutor(max_workers=3) as probe_executor:
+            f_status = probe_executor.submit(_probe_status)
+            f_search = probe_executor.submit(_probe_search)
+            f_orgs = probe_executor.submit(_probe_orgs)
+
+            # 1. Probe status_show
+            try:
+                r_status = f_status.result()
+                if _is_parked_or_domain_sale(clean_host, r_status):
+                    res["error"] = "Domain For Sale"
+                elif r_status.status_code == 200:
+                    s_json = r_status.json()
+                    status_res = s_json.get("result", {})
+                    if isinstance(status_res, dict) and (
+                        "ckan_version" in status_res or "installed_version" in status_res or "site_title" in status_res
+                    ):
+                        res["is_ckan"] = True
+                        res["version"] = status_res.get("ckan_version") or status_res.get("installed_version")
+                        res["site_title"] = status_res.get("site_title")
+                elif r_status.status_code == 401:
+                    res["is_ckan"] = True
+                    res["requires_token"] = True
+            except (
+                requests.exceptions.SSLError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                RuntimeError,
+            ):
+                raise
+            except Exception:
+                pass
+
+            # 2. Probe package_search for dataset count
+            if res["error"] != "Domain For Sale":
+                try:
+                    r_search = f_search.result()
+                    if _is_parked_or_domain_sale(clean_host, r_search):
+                        res["error"] = "Domain For Sale"
+                        res["is_ckan"] = False
+                    elif r_search.status_code == 200:
+                        try:
+                            s_data = r_search.json()
+                            if isinstance(s_data, dict):
+                                res_dict = s_data.get("result", {})
+                                if isinstance(res_dict, dict):
+                                    res["is_ckan"] = True
+                                    res["datasets"] = res_dict.get("count", 0)
+                        except Exception:
+                            pass
+                    elif r_search.status_code == 401:
+                        res["is_ckan"] = True
+                        res["requires_token"] = True
+                except (
+                    requests.exceptions.SSLError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                    RuntimeError,
+                ):
+                    raise
+                except Exception:
+                    pass
+
+            # 3. Probe organization_list
+            if res["error"] != "Domain For Sale":
+                try:
+                    r_org = f_orgs.result()
+                    if _is_parked_or_domain_sale(clean_host, r_org):
+                        res["error"] = "Domain For Sale"
+                        res["is_ckan"] = False
+                    elif r_org.status_code == 200:
+                        try:
+                            org_data = r_org.json()
+                            if isinstance(org_data, dict):
+                                org_res = org_data.get("result", [])
+                                if isinstance(org_res, list):
+                                    res["is_ckan"] = True
+                                    res["organizations"] = len(org_res)
+                        except Exception:
+                            pass
+                except (
+                    requests.exceptions.SSLError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                    RuntimeError,
+                ):
+                    raise
+                except Exception:
+                    pass
+
+        # If not CKAN and no error yet, check status codes
+        if not res["is_ckan"] and not res["error"]:
+            for r_probe in [r_search, r_status, r_org]:
+                if r_probe is not None and r_probe.status_code == 403:
+                    if any(
+                        k in r_probe.text.lower()
+                        for k in ["cloudflare", "just a moment", "challenge-platform", "waf", "ddos-guard"]
+                    ):
+                        res["error"] = "Bot Protection (WAF)"
+                    else:
+                        res["error"] = "Forbidden (403)"
+                    break
+            if not res["error"]:
+                res["error"] = "Not a CKAN server"
+
+        res["latency_seconds"] = round(time.time() - t0, 2)
+
+    except RuntimeError as re_err:
+        if "interpreter shutdown" in str(re_err).lower():
+            res["error"] = "Interrupted"
+            return res
+        raise
+    except requests.exceptions.SSLError as ssl_err:
+        res["latency_seconds"] = round(time.time() - t0, 2)
+        res["error"] = abbreviate_error(str(ssl_err))
+        res["is_ssl_error"] = True
+    except requests.exceptions.Timeout:
+        res["latency_seconds"] = round(time.time() - t0, 2)
+        res["error"] = f"Timeout ({timeout}s)"
+    except Exception as e:
+        res["latency_seconds"] = round(time.time() - t0, 2)
+        err_str = str(e)
+        if "interpreter shutdown" in err_str.lower():
+            res["error"] = "Interrupted"
+            return res
+        abbr = abbreviate_error(err_str)
+        res["error"] = abbr
+        res["is_ssl_error"] = (
+            abbr.startswith("SSL ") or "ssl" in err_str.lower() or isinstance(e, requests.exceptions.SSLError)
+        )
+
+    return res
+
+
 def fetch_server_stats(
     host: str,
     query: str | None = None,
@@ -663,10 +1060,10 @@ def fetch_server_stats(
     cache_ttl_hours: float = 24.0,
 ) -> dict[str, Any]:
     """Retrieve counts of datasets, organizations, version and latency for a CKAN server with 24h cache."""
+    is_explicit_http = host.lower().startswith("http://")
     clean_host = host.replace("https://", "").replace("http://", "").strip("/")
     if "/" in clean_host:
         clean_host = clean_host.split("/", 1)[0]
-    base_url = f"https://{clean_host}"
     headers = get_request_headers(host=clean_host, api_token=api_token, repo_root=repo_root)
 
     env_repo = (
@@ -694,104 +1091,43 @@ def fetch_server_stats(
         except Exception:
             pass
 
-    stats: dict[str, Any] = {
-        "server": clean_host,
-        "datasets": 0,
-        "organizations": 0,
-        "groups": 0,
-        "is_ckan": False,
-        "requires_token": False,
-        "error": None,
-        "version": None,
-        "site_title": None,
-        "latency_seconds": None,
-    }
+    primary_scheme = "http" if is_explicit_http else "https"
+    primary_url = f"{primary_scheme}://{clean_host}"
 
-    t0 = time.time()
-    try:
+    stats = _probe_ckan_url(primary_url, clean_host, headers, timeout, query=query)
+    stats["server"] = clean_host
+    stats["scheme"] = primary_scheme
 
-        def _probe_status() -> requests.Response:
-            return requests.get(f"{base_url}/api/3/action/status_show", headers=headers, timeout=timeout)
-
-        def _probe_search() -> requests.Response:
-            search_q = urllib.parse.quote(query) if query else "*:*"
-            return requests.get(
-                f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
-                headers=headers,
-                timeout=timeout,
-            )
-
-        def _probe_orgs() -> requests.Response:
-            return requests.get(
-                f"{base_url}/api/3/action/organization_list",
-                headers=headers,
-                timeout=timeout,
-            )
-
+    # Enhancement 1: If server is on HTTP, check if HTTPS is available and recommend switching if fully functional
+    if primary_scheme == "http" and stats.get("is_ckan"):
         try:
-            with ThreadPoolExecutor(max_workers=3) as probe_executor:
-                f_status = probe_executor.submit(_probe_status)
-                f_search = probe_executor.submit(_probe_search)
-                f_orgs = probe_executor.submit(_probe_orgs)
+            https_url = f"https://{clean_host}"
+            https_stats = _probe_ckan_url(https_url, clean_host, headers, timeout=min(5, timeout), query=query)
+            if https_stats.get("is_ckan") and not https_stats.get("is_ssl_error") and not https_stats.get("error"):
+                stats["https_available"] = True
+                stats["https_upgrade_recommended"] = True
+        except Exception:
+            pass
 
-                # 1. Probe status_show
-                try:
-                    r_status = f_status.result()
-                    if r_status.status_code == 200:
-                        stats["is_ckan"] = True
-                        s_json = r_status.json()
-                        res = s_json.get("result", {})
-                        stats["version"] = res.get("ckan_version") or res.get("installed_version")
-                        stats["site_title"] = res.get("site_title")
-                    elif r_status.status_code == 401:
-                        stats["is_ckan"] = True
-                        stats["requires_token"] = True
-                except Exception:
-                    pass
-
-                # 2. Probe package_search for dataset count
-                r_search = f_search.result()
-                if r_search.status_code == 200:
-                    stats["is_ckan"] = True
-                    try:
-                        s_data = r_search.json()
-                        res = s_data.get("result", {})
-                        stats["datasets"] = res.get("count", 0)
-                    except Exception:
-                        pass
-                elif r_search.status_code == 401:
-                    stats["is_ckan"] = True
-                    stats["requires_token"] = True
-
-                # 3. Probe organization_list
-                try:
-                    r_org = f_orgs.result()
-                    if r_org.status_code == 200:
-                        stats["is_ckan"] = True
-                        org_data = r_org.json()
-                        res = org_data.get("result", [])
-                        if isinstance(res, list):
-                            stats["organizations"] = len(res)
-                except Exception:
-                    pass
-        except RuntimeError as re:
-            if "interpreter shutdown" in str(re).lower():
-                stats["error"] = "Interrupted"
-                return stats
-            raise
-
-        stats["latency_seconds"] = round(time.time() - t0, 2)
-
-    except requests.exceptions.Timeout:
-        stats["latency_seconds"] = round(time.time() - t0, 2)
-        stats["error"] = f"Timeout ({timeout}s)"
-    except Exception as e:
-        stats["latency_seconds"] = round(time.time() - t0, 2)
-        err_msg = str(e)
-        if "interpreter shutdown" in err_msg.lower():
-            stats["error"] = "Interrupted"
-            return stats
-        stats["error"] = err_msg
+    # Enhancement 2: If primary was HTTPS and SSL failed, check if we can fall back to HTTP
+    if primary_scheme == "https" and stats.get("is_ssl_error"):
+        try:
+            http_url = f"http://{clean_host}"
+            http_stats = _probe_ckan_url(http_url, clean_host, headers, timeout=timeout, query=query)
+            if http_stats.get("is_ckan"):
+                stats["is_ckan"] = True
+                stats["datasets"] = http_stats.get("datasets", 0)
+                stats["organizations"] = http_stats.get("organizations", 0)
+                stats["groups"] = http_stats.get("groups", 0)
+                stats["version"] = http_stats.get("version")
+                stats["site_title"] = http_stats.get("site_title")
+                stats["requires_token"] = http_stats.get("requires_token", False)
+                stats["http_fallback"] = True
+                stats["ssl_error"] = stats.get("error")
+                stats["error"] = None
+                stats["scheme"] = "http"
+        except Exception:
+            pass
 
     # Cache results (never cache transient shutdown or interruption errors)
     err_str = str(stats.get("error") or "").lower()
@@ -845,9 +1181,22 @@ def display_server_stats(
     table.add_column("Latency", justify="center")
     table.add_column("Status", justify="left")
 
+    def _format_count(val: Any) -> str:
+        if val is None or val == "-":
+            return "-"
+        if isinstance(val, int | float):
+            return f"{int(val):,}"
+        if isinstance(val, str):
+            clean = val.replace(",", "").strip()
+            if clean.isdigit():
+                return f"{int(clean):,}"
+            return val
+        return str(val)
+
     def _query_stat(inst: ServerInstallation) -> tuple[ServerInstallation, dict[str, Any]]:
+        host_to_query = inst.url if inst.scheme == "http" else inst.clean_hostname
         s = fetch_server_stats(
-            host=inst.clean_hostname,
+            host=host_to_query,
             query=query,
             api_token=api_token,
             timeout=timeout,
@@ -884,18 +1233,25 @@ def display_server_stats(
                 clickable_host = f"[link={inst.url}]{name_disp}[/link]" if inst.url else name_disp
                 cc = inst.country_code or "-"
                 ver_disp = format_version(stat.get("version") or inst.version)
-                datasets_disp = f"{stat.get('datasets', 0):,}" if stat.get("is_ckan") else "-"
-                orgs_disp = f"{stat.get('organizations', 0):,}" if stat.get("is_ckan") else "-"
+                is_ckan = bool(stat.get("is_ckan"))
+                datasets_disp = _format_count(stat.get("datasets", 0)) if is_ckan else "-"
+                orgs_disp = _format_count(stat.get("organizations", 0)) if is_ckan else "-"
 
                 lat = stat.get("latency_seconds")
                 is_err = bool(stat.get("error"))
-                is_ckan = bool(stat.get("is_ckan"))
                 req_tok = bool(stat.get("requires_token"))
 
                 lat_badge = format_response_latency(lat, is_online=is_ckan, requires_token=req_tok, is_error=is_err)
 
-                if stat.get("error"):
-                    status_text = f"[red]{stat['error']}[/red]"
+                if not is_ckan:
+                    if stat.get("error"):
+                        status_text = f"[red]{abbreviate_error(str(stat['error']))}[/red]"
+                    else:
+                        status_text = "[red]Not CKAN Server[/red]"
+                elif stat.get("http_fallback"):
+                    status_text = "[yellow]HTTP (SSL Failed)[/yellow]"
+                elif stat.get("https_upgrade_recommended"):
+                    status_text = "[cyan]Online (HTTPS Avail)[/cyan]"
                 elif req_tok:
                     status_text = "[yellow]Auth Required[/yellow]"
                 elif stat.get("cached"):

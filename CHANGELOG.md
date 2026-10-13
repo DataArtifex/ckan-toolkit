@@ -2,6 +2,7 @@
 
 ## [0.2.0]
 
+- Aligned SSL/HTTP error message handling and diagnostics on the `nada-toolkit` implementation: added `abbreviate_error()`, enhanced `classify_harvest_error()` with SSL/TLS and network error categories, added parked/domain-for-sale detection (`_is_parked_or_domain_sale`), and added automatic HTTP fallback when HTTPS fails SSL verification in `stats` command.
 - Documented server compatibility, apex domain separation, Data.gov API restrictions, `status_show` hardening, and metadata standard requirements across `README.md`, `IMPLEMENTATION.md`, and Sphinx docs.
 - Added support for `DARTFX_CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY_ROOT`, and `CKAN_REPOSITORY` environment variables alongside `DARTFX_CKAN_REPOSITORY` for harvest, errors, and stats repository root resolution.
 - Added resilient ecosystem catalog fallback to `CKANServer.get_info_version()`, `CKANServer.get_info_server()`, and `dartfx-ckan info` when live `status_show` probes are unavailable, restricted, or fail with HTTP 405/403.
