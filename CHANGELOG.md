@@ -2,6 +2,9 @@
 
 ## [0.2.0]
 
+- Added dual version columns (`Live Ver` and `Dataset Ver`) to `stats` command table to contrast live probed versions against ecosystem dataset versions with automatic upgrade highlighting.
+- Added subpath preservation (e.g. from `inst.url`) and automatic `/data` subpath fallback probing in `fetch_server_stats`, enabling accurate stats for subpath-mounted CKAN portals such as `data.gov.au/data`, `data.overheid.nl/data`, and `data.bris.ac.uk/data`.
+- Enhanced bot protection / WAF detection in `_probe_ckan_url` to detect HTML challenge signatures (Anubis, PerimeterX, Cloudflare, DDoS-Guard, etc.) across both HTTP 200 and 403 responses.
 - Updated default `User-Agent` to `Mozilla/5.0 (compatible; dartfx-ckan/{version}; +https://github.com/DataArtifex/dartfx-ckan)` removing WAF/bot triggers (`Harvester`), and added automatic browser User-Agent fallback when servers return HTTP 403.
 - Updated `stats` command table to display the server hostname as an active clickable link (with automatic `http`/`https` fallback awareness) to open the portal homepage.
 - Aligned SSL/HTTP error message handling and diagnostics on the `nada-toolkit` implementation: added `abbreviate_error()`, enhanced `classify_harvest_error()` with SSL/TLS and network error categories, added parked/domain-for-sale detection (`_is_parked_or_domain_sale`), and added automatic HTTP fallback when HTTPS fails SSL verification in `stats` command.

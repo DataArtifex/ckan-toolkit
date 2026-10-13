@@ -446,3 +446,50 @@ def test_fetch_server_stats_waf_retry_browser_ua(tmp_path: Path, monkeypatch) ->
     assert stats["organizations"] == 2
     assert stats["version"] == "2.6.9"
     assert stats["error"] is None
+
+
+def test_display_server_stats_version_comparison(tmp_path: Path, monkeypatch) -> None:
+    from rich.console import Console
+
+    from dartfx.ckan.ckan import ServerInstallation
+    from dartfx.ckan.harvester import display_server_stats
+
+    # Create dummy installations
+    inst1 = ServerInstallation(hostname="online-upgraded.org", country="Australia", version="2.9.0")
+    inst2 = ServerInstallation(hostname="not-ckan.org", country="United States", version="2.11.2")
+
+    def mock_fetch(host, **_kwargs):
+        if "online-upgraded.org" in host:
+            return {
+                "is_ckan": True,
+                "version": "2.11.0",
+                "datasets": 100,
+                "organizations": 10,
+                "latency_seconds": 0.4,
+                "error": None,
+            }
+        return {
+            "is_ckan": False,
+            "version": None,
+            "datasets": 0,
+            "organizations": 0,
+            "latency_seconds": 0.2,
+            "error": "Not a CKAN server",
+        }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_stats", mock_fetch)
+
+    captured_console = Console(record=True, width=120)
+    display_server_stats(
+        installations=[inst1, inst2],
+        console=captured_console,
+        workers=1,
+        repo_root=tmp_path,
+        refresh_cache=True,
+    )
+    output = captured_console.export_text()
+    assert "Live Ver" in output
+    assert "Dataset Ver" in output
+    assert "v2.11.0" in output
+    assert "v2.9.0" in output
+    assert "v2.11.2" in output

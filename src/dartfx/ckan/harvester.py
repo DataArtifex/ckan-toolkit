@@ -931,10 +931,17 @@ def _probe_ckan_url(
                     s_json = r_status.json()
                     status_res = s_json.get("result", {})
                     if isinstance(status_res, dict) and (
-                        "ckan_version" in status_res or "installed_version" in status_res or "site_title" in status_res
+                        "ckan_version" in status_res
+                        or "installed_version" in status_res
+                        or "version" in status_res
+                        or "site_title" in status_res
                     ):
                         res["is_ckan"] = True
-                        res["version"] = status_res.get("ckan_version") or status_res.get("installed_version")
+                        res["version"] = (
+                            status_res.get("ckan_version")
+                            or status_res.get("installed_version")
+                            or status_res.get("version")
+                        )
                         res["site_title"] = status_res.get("site_title")
                 elif r_status.status_code == 401:
                     res["is_ckan"] = True
@@ -1035,7 +1042,9 @@ def _probe_ckan_url(
                         )
                         if r_b_status.status_code == 200:
                             s_res = r_b_status.json().get("result", {})
-                            res["version"] = s_res.get("ckan_version") or s_res.get("installed_version")
+                            res["version"] = (
+                                s_res.get("ckan_version") or s_res.get("installed_version") or s_res.get("version")
+                            )
                             res["site_title"] = s_res.get("site_title")
                     except Exception:
                         pass
@@ -1049,6 +1058,17 @@ def _probe_ckan_url(
                             res["organizations"] = len(r_b_org.json().get("result", []))
                     except Exception:
                         pass
+            except Exception:
+                pass
+
+        # Fallback version detection from HTML homepage if status_show was missing version
+        if res["is_ckan"] and not res.get("version"):
+            try:
+                r_home = requests.get(base_url, headers=headers, timeout=min(timeout, 3))
+                if r_home.status_code == 200 and r_home.text:
+                    m = re.search(r"CKAN[\s/]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", r_home.text, re.I)
+                    if m:
+                        res["version"] = m.group(1)
             except Exception:
                 pass
 
@@ -1226,16 +1246,20 @@ def display_server_stats(
     timeout: int = 10,
     repo_root: Path | None = None,
     workers: int = 8,
+    installations: list[ServerInstallation] | None = None,
+    console: Console | None = None,
 ) -> None:
     """Display live dataset and organization counts for CKAN servers."""
-    installations = fetch_ckan_installations(
-        target_server=None if server.upper() == "ALL" else server,
-        country=country,
-        fallback_unlisted=True,
-    )
+    target_console = console or Console()
+    if installations is None:
+        installations = fetch_ckan_installations(
+            target_server=None if server.upper() == "ALL" else server,
+            country=country,
+            fallback_unlisted=True,
+        )
 
     if not installations:
-        console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
+        target_console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
         return
 
     table = Table(
@@ -1245,7 +1269,8 @@ def display_server_stats(
     )
     table.add_column("Server", style="cyan", no_wrap=True)
     table.add_column("Country", style="green", justify="center")
-    table.add_column("Ver", style="dim", justify="center")
+    table.add_column("Live Ver", justify="center", no_wrap=True)
+    table.add_column("Dataset Ver", justify="center", no_wrap=True)
     table.add_column("Datasets", justify="right", style="cyan")
     table.add_column("Organizations", justify="right", style="yellow")
     table.add_column("Latency", justify="center")
@@ -1284,7 +1309,7 @@ def display_server_stats(
         MofNCompleteColumn(),
         TimeRemainingColumn(),
         TextColumn("[dim]{task.fields[server]}[/dim]"),
-        console=console,
+        console=target_console,
         transient=True,
     )
 
@@ -1308,8 +1333,24 @@ def display_server_stats(
 
                 clickable_host = f"[link={home_url}]{server_disp}[/link]" if home_url else server_disp
                 cc = inst.country_code or "-"
-                ver_disp = format_version(stat.get("version") or inst.version)
                 is_ckan = bool(stat.get("is_ckan"))
+                live_v = format_version(stat.get("version")) if is_ckan and stat.get("version") else "-"
+                cat_v = format_version(inst.version)
+
+                if live_v != "-" and cat_v != "-":
+                    if live_v == cat_v:
+                        live_disp = f"[green]{live_v}[/green]"
+                        cat_disp = f"[dim]{cat_v}[/dim]"
+                    else:
+                        live_disp = f"[bold cyan]{live_v}[/bold cyan]"
+                        cat_disp = f"[yellow]{cat_v}[/yellow]"
+                elif live_v != "-":
+                    live_disp = f"[green]{live_v}[/green]"
+                    cat_disp = "[dim]-[/dim]"
+                else:
+                    live_disp = "[dim]-[/dim]"
+                    cat_disp = f"[dim]{cat_v}[/dim]" if cat_v != "-" else "[dim]-[/dim]"
+
                 datasets_disp = _format_count(stat.get("datasets", 0)) if is_ckan else "-"
                 orgs_disp = _format_count(stat.get("organizations", 0)) if is_ckan else "-"
 
@@ -1335,17 +1376,17 @@ def display_server_stats(
                 else:
                     status_text = "[green]Online[/green]"
 
-                table.add_row(clickable_host, cc, ver_disp, datasets_disp, orgs_disp, lat_badge, status_text)
+                table.add_row(clickable_host, cc, live_disp, cat_disp, datasets_disp, orgs_disp, lat_badge, status_text)
     except (KeyboardInterrupt, SystemExit):
         executor.shutdown(wait=False, cancel_futures=True)
-        console.print("\n[yellow]Querying cancelled by user (Ctrl-C).[/yellow]")
+        target_console.print("\n[yellow]Querying cancelled by user (Ctrl-C).[/yellow]")
         if table.rows:
-            console.print(table)
+            target_console.print(table)
         return
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    console.print(table)
+    target_console.print(table)
 
 
 def fetch_active_datasets(
