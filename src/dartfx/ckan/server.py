@@ -6,6 +6,7 @@ import os
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+import requests
 import requests_cache
 
 from dartfx.ckan.__about__ import __version__
@@ -43,7 +44,7 @@ class CKANServer:
         client: CKANClientProtocol | None = None,
         session: requests_cache.CachedSession | None = None,
         lookup_installation: bool = True,
-        ssl_verify: bool = True,
+        ssl_verify: bool | str = True,
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
         """Create a CKAN server handle.
@@ -105,7 +106,13 @@ class CKANServer:
         self.installation = server_inst
         self.server_url = clean_url
         self.api_key = api_key
-        self.ssl_verify = ssl_verify
+        if ssl_verify is True and clean_url.startswith("https://"):
+            from dartfx.ckan.harvester import get_ca_bundle_for_host
+
+            cached_bundle = get_ca_bundle_for_host(server_inst.clean_hostname)
+            if cached_bundle:
+                ssl_verify = cached_bundle
+        self.ssl_verify: bool | str = ssl_verify
         self._session = session or requests_cache.CachedSession(backend="memory", cache_name="ckan")
         self._client = client or CKANAPIClient(self.server_url, api_key=api_key)
         self._info_cache: ServerInfo | None = None
@@ -211,6 +218,125 @@ class CKANServer:
             },
         }
 
+    def get_info_export_formats(self) -> dict[str, Any]:
+        """Identify available metadata export and harvest formats based on deployed extensions and capabilities."""
+        clean_host = self.installation.clean_hostname
+        ext_list: list[str] = []
+        try:
+            server_info = self.get_info_server()
+            raw_exts = server_info.get("data", {}).get("extensions", [])
+            if isinstance(raw_exts, list):
+                ext_list = [str(e).strip().lower() for e in raw_exts if e]
+            elif isinstance(raw_exts, str):
+                ext_list = [e.strip().lower() for e in raw_exts.split(",") if e.strip()]
+        except Exception:
+            if isinstance(self.installation.extensions, list):
+                ext_list = [str(e).strip().lower() for e in self.installation.extensions if e]
+            elif isinstance(self.installation.extensions, str):
+                ext_list = [e.strip().lower() for e in self.installation.extensions.split(",") if e.strip()]
+
+        has_dcat: bool | None = None
+        has_schemaorg: bool = False
+        has_croissant: bool = False
+        has_ddi: bool = False
+
+        if ext_list:
+            has_dcat = any("dcat" in e for e in ext_list)
+            has_schemaorg = any("structured_data" in e or "dcat" in e for e in ext_list)
+            has_croissant = any("croissant" in e for e in ext_list)
+            has_ddi = any("ddi" in e for e in ext_list)
+        else:
+            # Fallback probe
+            try:
+                headers = {
+                    "User-Agent": (
+                        f"Mozilla/5.0 (compatible; dartfx-ckan/{__version__}; +https://github.com/DataArtifex/dartfx-ckan)"
+                    )
+                }
+                if self.api_key:
+                    headers["Authorization"] = self.api_key
+                r = self._session.get(
+                    f"https://{clean_host}/catalog.xml",
+                    headers=headers,
+                    timeout=5,
+                    verify=self.ssl_verify,
+                )
+                if r.status_code == 200:
+                    has_dcat = True
+                    has_schemaorg = True
+                elif r.status_code in (404, 501):
+                    has_dcat = False
+            except Exception:
+                has_dcat = False
+
+        dcat_available = bool(has_dcat)
+        schemaorg_available = bool(has_schemaorg)
+        croissant_available = bool(has_croissant)
+        ddi_available = bool(has_ddi)
+
+        formats: dict[str, dict[str, Any]] = {
+            "json": {
+                "displayName": "CKAN Package JSON",
+                "mediaType": "application/json",
+                "requiredExtension": None,
+                "isHarvestable": True,
+                "isVisibleInUserInterface": True,
+            },
+            "resources": {
+                "displayName": "Dataset Resources JSON",
+                "mediaType": "application/json",
+                "requiredExtension": None,
+                "isHarvestable": True,
+                "isVisibleInUserInterface": True,
+            },
+            "dcat": {
+                "displayName": "DCAT 2/3 RDF/XML",
+                "mediaType": "application/rdf+xml",
+                "requiredExtension": "ckanext-dcat",
+                "isHarvestable": dcat_available,
+                "isVisibleInUserInterface": dcat_available,
+            },
+            "jsonld": {
+                "displayName": "DCAT JSON-LD",
+                "mediaType": "application/ld+json",
+                "requiredExtension": "ckanext-dcat",
+                "isHarvestable": dcat_available,
+                "isVisibleInUserInterface": dcat_available,
+            },
+            "ttl": {
+                "displayName": "DCAT Turtle",
+                "mediaType": "text/turtle",
+                "requiredExtension": "ckanext-dcat",
+                "isHarvestable": dcat_available,
+                "isVisibleInUserInterface": dcat_available,
+            },
+            "schemaorg": {
+                "displayName": "Schema.org Dataset JSON-LD",
+                "mediaType": "application/ld+json",
+                "requiredExtension": "ckanext-dcat (structured_data)",
+                "isHarvestable": schemaorg_available,
+                "isVisibleInUserInterface": schemaorg_available,
+            },
+            "croissant": {
+                "displayName": "MLCommons Croissant JSON-LD",
+                "mediaType": "application/ld+json",
+                "requiredExtension": "ckanext-dcat (croissant)",
+                "isHarvestable": croissant_available,
+                "isVisibleInUserInterface": croissant_available,
+            },
+            "ddi": {
+                "displayName": "DDI-Codebook 2.5 XML",
+                "mediaType": "application/xml",
+                "requiredExtension": "ckanext-ddi / Resources",
+                "isHarvestable": ddi_available,
+                "isVisibleInUserInterface": ddi_available,
+            },
+        }
+        return {
+            "status": "OK",
+            "data": formats,
+        }
+
     def search(self, params: SearchParameters | None = None) -> dict[str, Any]:
         """Search datasets using SearchParameters."""
         p = params or SearchParameters()
@@ -276,7 +402,23 @@ class CKANServer:
         else:
             url = f"https://{clean_host}/dataset/{identifier}.{fmt}"
 
-        resp = self._session.get(url, headers=headers, verify=self.ssl_verify, timeout=15)
+        try:
+            resp = self._session.get(url, headers=headers, verify=self.ssl_verify, timeout=15)
+        except requests.exceptions.SSLError as ssl_err:
+            if url.startswith("https://") and "unable to get local issuer certificate" in str(ssl_err):
+                try:
+                    from dartfx.ckan.harvester import resolve_aia_intermediate_ca
+
+                    bundle = resolve_aia_intermediate_ca(clean_host)
+                    if bundle:
+                        self.ssl_verify = str(bundle)
+                        resp = self._session.get(url, headers=headers, verify=self.ssl_verify, timeout=15)
+                    else:
+                        raise
+                except Exception:
+                    raise ssl_err from None
+            else:
+                raise
         if resp.status_code == 200:
             return resp.text
         msg = f"Export format '{export_format}' not available for dataset '{identifier}' (HTTP {resp.status_code})"

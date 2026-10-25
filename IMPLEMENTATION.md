@@ -49,13 +49,30 @@ The codebase is organized into modular layers:
   - Compares remote dataset state against local manifest records (`.manifest.json`).
   - Computes SHA-256 hashes of downloaded content to detect additions, updates, and unchanged datasets.
   - Detects deletions when datasets are removed from the remote catalog.
-  - Local file organization: `<repo_root>/<server_hostname>/<sanitized_pid>/metadata/<file_name>` (resolved via `--repo-dir`, `DARTFX_CKAN_REPOSITORY_ROOT`, `DARTFX_CKAN_REPOSITORY`, `CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY`, or current working directory).
-- **Supported Formats**:
-  - `json`: Standard CKAN package JSON (`.ckan.json`).
-  - `dcat`: DCAT 2/3 RDF/XML (`.dcat.xml`).
-  - `jsonld`: DCAT JSON-LD (`.dcat.jsonld`).
-  - `ttl`: DCAT Turtle (`.dcat.ttl`).
-  - `resources`: Dataset resource list (`.resources.json`).
+  - Local file organization: `<repo_root>/<server_hostname>/<sanitized_pid>/metadata/<file_name>` (resolved via positional argument `OUTPUT_DIR`, `--repo-dir`, `DARTFX_CKAN_REPOSITORY_ROOT`, `DARTFX_CKAN_REPOSITORY`, `CKAN_REPOSITORY_ROOT`, `CKAN_REPOSITORY`, or current working directory).
+- **Flexible Invocation & Parity**:
+  - Supports both positional `OUTPUT_DIR` and `--repo-dir` / `-d` for storage paths.
+  - Supports targeting single datasets/packages via `--package`, `--id`, `--pid`, `-p`.
+  - Full flag aliases matching Dataverse and NADA: `--start-date` (`--since`), `--formats` (`--format`), `-n` (`--limit`), `--threads` (`--workers`), `--refresh` (`--refresh-catalog`), `--retry` (`--retry-errors`), `--verify-sha256` / `--force-download` (`--force-verify`), and `--key` (`--api-token`).
+  - Automatic timestamped file logging (`harvester-YYYYMMDD-HHMMSS.log`) inside repository directory or `--log-file`.
+  - Upfront execution configuration panel and parameter table prior to harvesting.
+  - Two-level progress bars showing catalog pagination discovery followed by multi-threaded record downloads.
+  - Per-server summary report table with clickable portal URLs, dataset counts, and addition/update/deletion/error statistics.
+  - Automatic error diagnostic reporting on failures: summary by error category (% of total) and detailed records table with clickable links and failure reasons.
+- **Supported Metadata Formats & Extension Requirements**:
+  - The harvest engine applies strictly to metadata records (never downloading raw data payloads or file attachments).
+  - Format requirements:
+    - `json`: Standard CKAN package JSON (`.ckan.json`) — Core CKAN API (`package_show`).
+    - `resources`: Dataset resource list (`.resources.json`) — Core CKAN API (`package_show`).
+    - `dcat`: DCAT 2/3 RDF/XML (`.dcat.xml`) — Requires `ckanext-dcat` extension.
+    - `jsonld`: DCAT JSON-LD (`.dcat.jsonld`) — Requires `ckanext-dcat` extension.
+    - `ttl`: DCAT Turtle (`.dcat.ttl`) — Requires `ckanext-dcat` extension.
+    - `schemaorg`: Schema.org Dataset JSON-LD (`.schemaorg.jsonld`) — Requires `ckanext-dcat` (`structured_data` plugin or `schemaorg` profile). Includes automatic HTML `<script type="application/ld+json">` scraping fallback.
+    - `croissant`: MLCommons Croissant JSON-LD (`.croissant.jsonld`) — Requires `ckanext-dcat >= 2.3.0` (`croissant` plugin).
+    - `ddi`: DDI-Codebook 2.5 XML (`.ddi.xml`) — Requires `ckanext-ddi` or DDI/XML resource attachments in the dataset.
+  - Upfront extension verification: `fetch_server_extensions()` inspects the cached or live `extensions` list from `status_show`. `is_format_supported_on_server()` determines if each requested format is enabled on the server. If an extension is not installed (e.g. `dcat` without `ckanext-dcat`), the format is cleanly skipped with a clear warning and excluded from target sync sets to avoid false deletions.
+  - `CKANServer.get_info_export_formats()`: Returns structured metadata on export formats, media types, required extensions, and harvestability. Displayed in `dartfx-ckan info` as a dedicated Rich table.
+  - Format capabilities reporting in `dartfx-ckan stats`: Displays an interactive `Formats` column with color-coded badges (`[DCAT]`, `[Schema]`, `[Croissant]`, `[DDI]`), summary capability counts in the table caption, and filtering flags (`--croissant`, `--dcat`, `--schemaorg`, `--ddi`).
 - **Multi-Threaded HTTP Execution**:
   - `stats`: Employs `ThreadPoolExecutor` to query installations in parallel (controlled by `--workers` / `--threads`, default: 8) and concurrently executes individual server endpoint probes (`status_show`, `package_search`, and `organization_list` via 3 parallel workers), reducing per-server latency to `max(t_probes)`.
   - `harvest`: Employs `ThreadPoolExecutor` within `ServerHarvester.sync()` to download metadata records (`fetch_dataset_record`) concurrently across worker threads (controlled by `--workers` / `--threads`, default: 4), with thread-safe result aggregation and atomic manifest persistence.
@@ -100,12 +117,12 @@ Built with `typer` and `rich`:
 - **macOS Smart Dash Normalization**: Sanitizes `–` and `—` arguments to standard hyphens before parsing.
 - **Output Formats**: Flexible display in interactive `table`, `json`, or `csv`.
 - **Commands**:
-  - `installations`: Worldwide repository list with country filtering.
+  - `installations` (alias: `list`): Worldwide repository list with country filtering.
   - `info`: Server metadata and extension capabilities.
   - `search`: Full-text and filtered dataset search.
   - `dataset`: Metadata inspection and DCAT/JSON export.
   - `organizations`: Organization directory.
-  - `stats`: Live server statistics, latency indicators, and status badges.
+  - `stats`: Live server statistics, format capability indicators (DCAT, Schema.org, Croissant, DDI), latency indicators, and status badges with format filtering (`--croissant`, `--dcat`, `--schemaorg`, `--ddi`).
   - `harvest`: Incremental sync engine with real-time Rich progress bars.
   - `errors`: Diagnostic error report from repository manifests.
   - `ecosystem`: Management of official CKAN Ecosystem Parquet datasets.

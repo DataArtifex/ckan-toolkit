@@ -89,6 +89,23 @@ def test_cli_info_command(monkeypatch):
             "extensions": ["dcat", "harvest"],
         }
     }
+    mock_server.get_info_export_formats.return_value = {
+        "status": "OK",
+        "data": {
+            "json": {
+                "displayName": "CKAN Package JSON",
+                "mediaType": "application/json",
+                "requiredExtension": None,
+                "isHarvestable": True,
+            },
+            "dcat": {
+                "displayName": "DCAT 2/3 RDF/XML",
+                "mediaType": "application/rdf+xml",
+                "requiredExtension": "ckanext-dcat",
+                "isHarvestable": True,
+            },
+        },
+    }
     monkeypatch.setattr("dartfx.ckan.cli.get_server", lambda *_args, **_kwargs: mock_server)
 
     runner = CliRunner()
@@ -97,6 +114,9 @@ def test_cli_info_command(monkeypatch):
     assert "Demo CKAN" in result.stdout
     assert "2.11.0" in result.stdout
     assert "dcat" in result.stdout
+    assert "Metadata Export Formats" in result.stdout
+    assert "CKAN Package JSON" in result.stdout
+    assert "DCAT 2/3 RDF/XML" in result.stdout
 
 
 def test_cli_info_command_fallback(monkeypatch):

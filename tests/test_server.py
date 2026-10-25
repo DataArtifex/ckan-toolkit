@@ -100,3 +100,38 @@ def test_server_get_info_raises_when_no_installation_data():
 
     with pytest.raises(RuntimeError, match="Connection failed"):
         server.get_info_server()
+
+
+def test_server_get_info_export_formats():
+    server = CKANServer("https://demo.ckan.org", client=FakeClient())
+    formats_resp = server.get_info_export_formats()
+    assert formats_resp.get("status") == "OK"
+    data = formats_resp.get("data", {})
+    assert "json" in data
+    assert "resources" in data
+    assert "dcat" in data
+    assert "jsonld" in data
+    assert "ttl" in data
+    assert "schemaorg" in data
+    assert "croissant" in data
+    assert "ddi" in data
+    assert data["json"]["isHarvestable"] is True
+    assert data["resources"]["isHarvestable"] is True
+
+
+def test_server_get_info_export_formats_with_extensions(monkeypatch):
+    server = CKANServer("https://demo.ckan.org", client=FakeClient())
+    monkeypatch.setattr(
+        server,
+        "get_info_server",
+        lambda: {
+            "status": "OK",
+            "data": {"extensions": ["dcat", "structured_data", "croissant", "ddi_theme"]},
+        },
+    )
+    formats_resp = server.get_info_export_formats()
+    data = formats_resp.get("data", {})
+    assert data["dcat"]["isHarvestable"] is True
+    assert data["schemaorg"]["isHarvestable"] is True
+    assert data["croissant"]["isHarvestable"] is True
+    assert data["ddi"]["isHarvestable"] is True

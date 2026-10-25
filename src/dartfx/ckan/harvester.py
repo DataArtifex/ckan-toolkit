@@ -5,10 +5,15 @@ A smart, incremental harvester for CKAN metadata records.
 Uses Typer for CLI interface and Rich for terminal visualizations.
 """
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
+import socket
+import ssl
+import sys
 import time
 import urllib.parse
 import warnings
@@ -118,6 +123,7 @@ FORMAT_EXTENSIONS: dict[str, str] = {
     "json": ".ckan.json",
     "native": ".ckan.json",
     "package": ".ckan.json",
+    "metadata": ".ckan.json",
     "dcat": ".dcat.xml",
     "dcat-xml": ".dcat.xml",
     "rdf": ".dcat.xml",
@@ -127,9 +133,48 @@ FORMAT_EXTENSIONS: dict[str, str] = {
     "ttl": ".dcat.ttl",
     "turtle": ".dcat.ttl",
     "resources": ".resources.json",
+    "schemaorg": ".schemaorg.jsonld",
+    "schema": ".schemaorg.jsonld",
+    "schema.org": ".schemaorg.jsonld",
+    "croissant": ".croissant.jsonld",
+    "mlcroissant": ".croissant.jsonld",
+    "ddi": ".ddi.xml",
+    "ddi-xml": ".ddi.xml",
 }
 
-ALL_SUPPORTED_FORMATS: list[str] = ["json", "dcat", "jsonld", "ttl", "resources"]
+ALL_SUPPORTED_FORMATS: list[str] = [
+    "json",
+    "dcat",
+    "jsonld",
+    "ttl",
+    "resources",
+    "schemaorg",
+    "croissant",
+    "ddi",
+]
+
+FORMAT_EXTENSION_REQUIREMENTS: dict[str, str | None] = {
+    "json": None,
+    "native": None,
+    "package": None,
+    "metadata": None,
+    "resources": None,
+    "dcat": "ckanext-dcat",
+    "dcat-xml": "ckanext-dcat",
+    "rdf": "ckanext-dcat",
+    "xml": "ckanext-dcat",
+    "jsonld": "ckanext-dcat",
+    "dcat_json": "ckanext-dcat",
+    "ttl": "ckanext-dcat",
+    "turtle": "ckanext-dcat",
+    "schemaorg": "ckanext-dcat",
+    "schema": "ckanext-dcat",
+    "schema.org": "ckanext-dcat",
+    "croissant": "ckanext-dcat (croissant)",
+    "mlcroissant": "ckanext-dcat (croissant)",
+    "ddi": "ckanext-ddi",
+    "ddi-xml": "ckanext-ddi",
+}
 
 
 def get_format_extension(fmt: str) -> str:
@@ -153,7 +198,7 @@ def normalize_formats(formats_input: str | list[str] | None) -> list[str]:
             fmt_clean = fmt.strip().lower()
             if not fmt_clean:
                 continue
-            if fmt_clean == "all":
+            if fmt_clean in ("all", "metadata"):
                 return list(ALL_SUPPORTED_FORMATS)
             if fmt_clean in ("native", "package"):
                 fmt_clean = "json"
@@ -163,6 +208,12 @@ def normalize_formats(formats_input: str | list[str] | None) -> list[str]:
                 fmt_clean = "jsonld"
             elif fmt_clean == "turtle":
                 fmt_clean = "ttl"
+            elif fmt_clean in ("schema", "schema.org", "schema_org", "schema-org"):
+                fmt_clean = "schemaorg"
+            elif fmt_clean in ("mlcroissant",):
+                fmt_clean = "croissant"
+            elif fmt_clean in ("ddi-xml", "ddi_xml", "codebook"):
+                fmt_clean = "ddi"
 
             if fmt_clean in ALL_SUPPORTED_FORMATS and fmt_clean not in parsed:
                 parsed.append(fmt_clean)
@@ -302,6 +353,9 @@ def get_request_headers(
 ) -> dict[str, str]:
     """Return standard headers with User-Agent and resolved CKAN API key."""
     headers = dict(DEFAULT_REQUEST_HEADERS)
+    custom_ua = os.environ.get("CKAN_USER_AGENT") or os.environ.get("DARTFX_CKAN_USER_AGENT")
+    if custom_ua:
+        headers["User-Agent"] = custom_ua.strip()
     resolved_token = resolve_server_token(host, repo_root=repo_root, explicit_token=api_token)
     if resolved_token:
         headers["Authorization"] = resolved_token.strip()
@@ -809,7 +863,7 @@ def format_response_latency(
         return f"[yellow]🔒 {lat:.1f}s[/yellow]"
 
     if lat < 1.5:
-        return f"[bold green]⚡ {lat:.1f}s[/bold green]"
+        return f"[bold green]🟢⚡ {lat:.1f}s[/bold green]"
     elif lat <= 4.0:
         return f"[green]🟢 {lat:.1f}s[/green]"
     elif lat <= 8.0:
@@ -872,12 +926,164 @@ def _is_parked_or_domain_sale(orig_host: str, resp: requests.Response) -> bool:
     return False
 
 
+def classify_server_availability(
+    status: str,
+    is_ckan: bool = False,
+    error: str | None = None,
+    requires_token: bool = False,
+) -> str:
+    """Classify server into tri-state availability: accessible, restricted, or offline.
+
+    - accessible: fully operational public CKAN catalog with accessible API.
+    - restricted: active server but protected by WAF/Cloudflare, perimeter blocks, or requiring API token.
+    - offline: domain dead, DNS failure, 404/410 retired, timeout, or not a CKAN server.
+    """
+    clean_status = (status or "").lower()
+    clean_error = str(error or "").lower() if error else ""
+
+    # 1. Check for restricted states (active server, but blocked or requiring credentials)
+    if requires_token or "auth required" in clean_status or "authentication" in clean_error:
+        return "restricted"
+
+    if any(
+        k in clean_status or k in clean_error
+        for k in [
+            "waf",
+            "cloudflare",
+            "bot protection",
+            "perimeter",
+            "forbidden",
+            "403",
+            "geo/ip",
+            "captcha",
+            "ddos-guard",
+            "incapsula",
+            "imperva",
+            "turnstile",
+        ]
+    ):
+        return "restricted"
+
+    # 2. Check for fully accessible operational CKAN catalog
+    if is_ckan and not clean_error:
+        return "accessible"
+
+    if is_ckan and any(s in clean_status for s in ["online", "cached", "http (ssl failed)"]):
+        return "accessible"
+
+    # 3. Otherwise, server is offline, non-CKAN, retired, or hard error
+    return "offline"
+
+
+def get_ca_bundle_for_host(host: str, cache_dir: Path | None = None) -> str | None:
+    """Return path to cached intermediate CA bundle for host if available.
+
+    Args:
+        host: Hostname or domain of the server.
+        cache_dir: Optional custom directory where CA bundles are cached.
+
+    Returns:
+        str | None: String path to the bundle file, or None if not cached.
+    """
+    clean_host = host.split(":")[0].strip()
+    target_cache = cache_dir or (Path.home() / ".cache" / "dartfx" / "ckan" / "ca_bundles")
+    bundle_path = target_cache / f"{clean_host}.pem"
+    if bundle_path.exists() and bundle_path.stat().st_size > 0:
+        return str(bundle_path)
+    return None
+
+
+def resolve_aia_intermediate_ca(
+    host: str,
+    port: int = 443,
+    timeout: int = 5,
+    cache_dir: Path | None = None,
+) -> Path | None:
+    """Attempt Authority Information Access (AIA) intermediate CA certificate fetching.
+
+    When a server provides an incomplete TLS certificate chain (missing intermediate CA certificate),
+    standard TLS libraries fail with SSLCertVerificationError ('unable to get local issuer certificate').
+    This function connects to the server with verify_mode=CERT_NONE to inspect the leaf certificate's
+    DER payload, extracts the Authority Information Access (AIA) CA Issuers URI, downloads the missing
+    intermediate certificate(s), and returns the path to a combined PEM CA bundle (certifi + intermediate).
+
+    Returns:
+        Path | None: Path to the combined CA bundle file if successfully created, or None if unavailable.
+    """
+    clean_host = host.split(":")[0].strip()
+    target_cache = cache_dir or (Path.home() / ".cache" / "dartfx" / "ckan" / "ca_bundles")
+    bundle_path = target_cache / f"{clean_host}.pem"
+
+    if bundle_path.exists() and bundle_path.stat().st_size > 0:
+        return bundle_path
+
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with socket.create_connection((clean_host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=clean_host) as ssock:
+                der_cert = ssock.getpeercert(binary_form=True)
+
+        if not der_cert:
+            return None
+
+        # Extract AIA CA Issuers HTTP URLs (ending in .crt or .cer) from DER
+        matches = re.findall(rb"https?://[^\x00-\x20\x7f-\xff]+\.(?:crt|cer)", der_cert)
+        if not matches:
+            return None
+
+        import certifi
+
+        with open(certifi.where(), encoding="utf-8") as f:
+            augmented_bundle = f.read()
+
+        urls_to_fetch = [m.decode("ascii", errors="ignore") for m in matches]
+        seen_urls = set(urls_to_fetch)
+        fetched_pems: list[str] = []
+
+        while urls_to_fetch:
+            url = urls_to_fetch.pop(0)
+            try:
+                r = requests.get(url, timeout=timeout)
+                if r.status_code == 200 and r.content:
+                    content = r.content
+                    if b"-----BEGIN CERTIFICATE-----" in content:
+                        pem_cert = content.decode("utf-8", errors="ignore")
+                    else:
+                        pem_cert = ssl.DER_cert_to_PEM_cert(content)
+                    fetched_pems.append(pem_cert)
+
+                    # Look for parent intermediate AIA URLs within the intermediate DER
+                    parent_matches = re.findall(rb"https?://[^\x00-\x20\x7f-\xff]+\.(?:crt|cer)", content)
+                    for pm in parent_matches:
+                        purl = pm.decode("ascii", errors="ignore")
+                        if purl not in seen_urls:
+                            seen_urls.add(purl)
+                            urls_to_fetch.append(purl)
+            except Exception:
+                continue
+
+        if not fetched_pems:
+            return None
+
+        augmented_bundle = f"{augmented_bundle}\n" + "\n".join(fetched_pems)
+        target_cache.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text(augmented_bundle, encoding="utf-8")
+        return bundle_path
+
+    except Exception:
+        return None
+
+
 def _probe_ckan_url(
     base_url: str,
     clean_host: str,
     headers: dict[str, str],
     timeout: int,
     query: str | None = None,
+    verify: str | bool | None = None,
 ) -> dict[str, Any]:
     """Probe a single base URL (http or https) for CKAN API endpoints."""
     res: dict[str, Any] = {
@@ -887,6 +1093,7 @@ def _probe_ckan_url(
         "groups": 0,
         "version": None,
         "site_title": None,
+        "extensions": [],
         "requires_token": False,
         "error": None,
         "is_ssl_error": False,
@@ -894,9 +1101,15 @@ def _probe_ckan_url(
     }
     t0 = time.time()
     try:
+        extra_kwargs: dict[str, Any] = {"verify": verify} if verify is not None else {}
 
         def _probe_status() -> requests.Response:
-            return requests.get(f"{base_url}/api/3/action/status_show", headers=headers, timeout=timeout)
+            return requests.get(
+                f"{base_url}/api/3/action/status_show",
+                headers=headers,
+                timeout=timeout,
+                **extra_kwargs,
+            )
 
         def _probe_search() -> requests.Response:
             search_q = urllib.parse.quote(query) if query else "*:*"
@@ -904,6 +1117,7 @@ def _probe_ckan_url(
                 f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
                 headers=headers,
                 timeout=timeout,
+                **extra_kwargs,
             )
 
         def _probe_orgs() -> requests.Response:
@@ -911,6 +1125,7 @@ def _probe_ckan_url(
                 f"{base_url}/api/3/action/organization_list",
                 headers=headers,
                 timeout=timeout,
+                **extra_kwargs,
             )
 
         r_status: requests.Response | None = None
@@ -943,6 +1158,11 @@ def _probe_ckan_url(
                             or status_res.get("version")
                         )
                         res["site_title"] = status_res.get("site_title")
+                        raw_exts = status_res.get("extensions", [])
+                        if isinstance(raw_exts, list):
+                            res["extensions"] = [str(e).strip() for e in raw_exts if e]
+                        elif isinstance(raw_exts, str):
+                            res["extensions"] = [e.strip() for e in raw_exts.split(",") if e.strip()]
                 elif r_status.status_code == 401:
                     res["is_ckan"] = True
                     res["requires_token"] = True
@@ -1013,6 +1233,91 @@ def _probe_ckan_url(
                 except Exception:
                     pass
 
+        # Handle potential rate-limiting, transient server errors (503/429/500/502/504), or concurrency issues
+        transient_codes = (429, 500, 502, 503, 504)
+        has_transient_failure = any(
+            r is not None and r.status_code in transient_codes for r in [r_status, r_search, r_org]
+        )
+
+        if (not res["is_ckan"] or has_transient_failure) and res["error"] != "Domain For Sale":
+            time.sleep(0.2)
+            if not res["is_ckan"] or (r_status is not None and r_status.status_code in transient_codes):
+                try:
+                    r_retry_status = _probe_status()
+                    if r_retry_status.status_code == 200:
+                        r_status = r_retry_status
+                        s_json = r_status.json()
+                        status_res = s_json.get("result", {})
+                        if isinstance(status_res, dict) and (
+                            "ckan_version" in status_res
+                            or "installed_version" in status_res
+                            or "version" in status_res
+                            or "site_title" in status_res
+                        ):
+                            res["is_ckan"] = True
+                            res["version"] = (
+                                status_res.get("ckan_version")
+                                or status_res.get("installed_version")
+                                or status_res.get("version")
+                            )
+                            res["site_title"] = status_res.get("site_title")
+                            raw_exts = status_res.get("extensions", [])
+                            if isinstance(raw_exts, list):
+                                res["extensions"] = [str(e).strip() for e in raw_exts if e]
+                            elif isinstance(raw_exts, str):
+                                res["extensions"] = [e.strip() for e in raw_exts.split(",") if e.strip()]
+                    elif r_retry_status.status_code == 401:
+                        res["is_ckan"] = True
+                        res["requires_token"] = True
+                except Exception:
+                    pass
+
+            if (not res["is_ckan"] or res.get("datasets") == 0) and (
+                r_search is not None and r_search.status_code in transient_codes
+            ):
+                try:
+                    time.sleep(0.1)
+                    r_retry_search = _probe_search()
+                    if r_retry_search.status_code == 200:
+                        r_search = r_retry_search
+                        s_data = r_search.json()
+                        if isinstance(s_data, dict):
+                            res_dict = s_data.get("result", {})
+                            if isinstance(res_dict, dict):
+                                res["is_ckan"] = True
+                                res["datasets"] = res_dict.get("count", 0)
+                    elif r_retry_search.status_code == 401:
+                        res["is_ckan"] = True
+                        res["requires_token"] = True
+                except Exception:
+                    pass
+
+        # Organization list fallback: support CKAN deployments requiring POST method
+        if (
+            (r_org is not None and (r_org.status_code in (400, 405) or r_org.status_code in transient_codes))
+            or (res["is_ckan"] and res.get("organizations") == 0)
+        ) and res["error"] != "Domain For Sale":
+            try:
+                post_headers = dict(headers)
+                post_headers["Content-Type"] = "application/json"
+                r_post_org = requests.post(
+                    f"{base_url}/api/3/action/organization_list",
+                    headers=post_headers,
+                    json={},
+                    timeout=timeout,
+                    **extra_kwargs,
+                )
+                if r_post_org.status_code == 200:
+                    r_org = r_post_org
+                    org_data = r_post_org.json()
+                    if isinstance(org_data, dict):
+                        org_res = org_data.get("result", [])
+                        if isinstance(org_res, list):
+                            res["is_ckan"] = True
+                            res["organizations"] = len(org_res)
+            except Exception:
+                pass
+
         # If not CKAN and any probe returned 403 (WAF / anti-bot), retry with standard browser User-Agent
         if not res["is_ckan"] and any(r is not None and r.status_code == 403 for r in [r_search, r_status, r_org]):
             try:
@@ -1026,6 +1331,7 @@ def _probe_ckan_url(
                     f"{base_url}/api/3/action/package_search?q={search_q}&rows=0",
                     headers=browser_h,
                     timeout=timeout,
+                    **extra_kwargs,
                 )
                 if r_b_search.status_code == 200:
                     res["is_ckan"] = True
@@ -1039,6 +1345,7 @@ def _probe_ckan_url(
                             f"{base_url}/api/3/action/status_show",
                             headers=browser_h,
                             timeout=timeout,
+                            **extra_kwargs,
                         )
                         if r_b_status.status_code == 200:
                             s_res = r_b_status.json().get("result", {})
@@ -1053,6 +1360,7 @@ def _probe_ckan_url(
                             f"{base_url}/api/3/action/organization_list",
                             headers=browser_h,
                             timeout=timeout,
+                            **extra_kwargs,
                         )
                         if r_b_org.status_code == 200:
                             res["organizations"] = len(r_b_org.json().get("result", []))
@@ -1064,7 +1372,7 @@ def _probe_ckan_url(
         # Fallback version detection from HTML homepage if status_show was missing version
         if res["is_ckan"] and not res.get("version"):
             try:
-                r_home = requests.get(base_url, headers=headers, timeout=min(timeout, 3))
+                r_home = requests.get(base_url, headers=headers, timeout=min(timeout, 3), **extra_kwargs)
                 if r_home.status_code == 200 and r_home.text:
                     m = re.search(r"CKAN[\s/]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", r_home.text, re.I)
                     if m:
@@ -1096,6 +1404,24 @@ def _probe_ckan_url(
                     elif r_probe.status_code == 403:
                         res["error"] = "Forbidden (403)"
                         break
+                    elif r_probe.status_code == 429:
+                        res["error"] = "Rate Limited (429)"
+                        break
+                    elif r_probe.status_code == 503:
+                        res["error"] = "Service Unavailable (503)"
+                        break
+                    elif r_probe.status_code == 502:
+                        res["error"] = "Bad Gateway (502)"
+                        break
+                    elif r_probe.status_code == 504:
+                        res["error"] = "Gateway Timeout (504)"
+                        break
+                    elif r_probe.status_code == 500:
+                        res["error"] = "Server Error (500)"
+                        break
+                    elif r_probe.status_code >= 500:
+                        res["error"] = f"Server Error ({r_probe.status_code})"
+                        break
             if not res["error"]:
                 res["error"] = "Not a CKAN server"
 
@@ -1109,6 +1435,7 @@ def _probe_ckan_url(
     except requests.exceptions.SSLError as ssl_err:
         res["latency_seconds"] = round(time.time() - t0, 2)
         res["error"] = abbreviate_error(str(ssl_err))
+        res["raw_ssl_error"] = str(ssl_err)
         res["is_ssl_error"] = True
     except requests.exceptions.Timeout:
         res["latency_seconds"] = round(time.time() - t0, 2)
@@ -1121,9 +1448,22 @@ def _probe_ckan_url(
             return res
         abbr = abbreviate_error(err_str)
         res["error"] = abbr
+        res["raw_ssl_error"] = err_str
         res["is_ssl_error"] = (
             abbr.startswith("SSL ") or "ssl" in err_str.lower() or isinstance(e, requests.exceptions.SSLError)
         )
+
+    if res["is_ckan"]:
+        exts_set = {str(e).strip().lower() for e in res.get("extensions", []) if e}
+        res["has_dcat"] = any("dcat" in e for e in exts_set)
+        res["has_schemaorg"] = any("structured_data" in e or "dcat" in e for e in exts_set)
+        res["has_croissant"] = any("croissant" in e for e in exts_set)
+        res["has_ddi"] = any("ddi" in e for e in exts_set)
+    else:
+        res["has_dcat"] = False
+        res["has_schemaorg"] = False
+        res["has_croissant"] = False
+        res["has_ddi"] = False
 
     return res
 
@@ -1169,6 +1509,12 @@ def fetch_server_stats(
                         cached_err = str(cdata.get("error") or "").lower()
                         if "interpreter shutdown" not in cached_err and "interrupted" not in cached_err:
                             cdata["cached"] = True
+                            if cdata.get("has_dcat") is None:
+                                c_exts = {str(e).strip().lower() for e in cdata.get("extensions", []) if e}
+                                cdata["has_dcat"] = any("dcat" in e for e in c_exts)
+                                cdata["has_schemaorg"] = any("structured_data" in e or "dcat" in e for e in c_exts)
+                                cdata["has_croissant"] = any("croissant" in e for e in c_exts)
+                                cdata["has_ddi"] = any("ddi" in e for e in c_exts)
                             return cdata
         except Exception:
             pass
@@ -1176,17 +1522,23 @@ def fetch_server_stats(
     primary_scheme = "http" if is_explicit_http else "https"
     primary_url = f"{primary_scheme}://{clean_host}{subpath}"
 
-    stats = _probe_ckan_url(primary_url, clean_host, headers, timeout, query=query)
+    cached_bundle = get_ca_bundle_for_host(clean_host) if primary_scheme == "https" else None
+    stats = _probe_ckan_url(primary_url, clean_host, headers, timeout, query=query, verify=cached_bundle)
     # If root returned not CKAN and no subpath was requested, check common /data subpath
     if not stats.get("is_ckan") and not subpath and not stats.get("is_ssl_error"):
         sub_url = f"{primary_scheme}://{clean_host}/data"
-        sub_stats = _probe_ckan_url(sub_url, clean_host, headers, timeout=min(timeout, 5), query=query)
+        sub_stats = _probe_ckan_url(
+            sub_url, clean_host, headers, timeout=min(timeout, 5), query=query, verify=cached_bundle
+        )
         if sub_stats.get("is_ckan"):
             stats = sub_stats
             stats["subpath"] = "/data"
 
     stats["server"] = clean_host
     stats["scheme"] = primary_scheme
+    if cached_bundle and stats.get("is_ckan"):
+        stats["aia_repaired"] = True
+        stats["ca_bundle"] = cached_bundle
 
     # Enhancement 1: If server is on HTTP, check if HTTPS is available and recommend switching if fully functional
     if primary_scheme == "http" and stats.get("is_ckan"):
@@ -1199,10 +1551,46 @@ def fetch_server_stats(
         except Exception:
             pass
 
-    # Enhancement 2: If primary was HTTPS and SSL failed, check if we can fall back to HTTP
+    # Enhancement 2: If primary was HTTPS and SSL failed, attempt AIA intermediate CA chasing
     if primary_scheme == "https" and stats.get("is_ssl_error"):
+        err_str = str(stats.get("raw_ssl_error") or stats.get("error") or "")
+        if (
+            "unable to get local issuer certificate" in err_str
+            or "Incomplete Chain" in str(stats.get("error"))
+            or "missing intermediate" in err_str.lower()
+        ):
+            try:
+                aia_bundle = resolve_aia_intermediate_ca(clean_host, port=443, timeout=min(5, timeout))
+                if aia_bundle:
+                    aia_stats = _probe_ckan_url(
+                        primary_url,
+                        clean_host,
+                        headers,
+                        timeout=timeout,
+                        query=query,
+                        verify=str(aia_bundle),
+                    )
+                    if aia_stats.get("is_ckan"):
+                        stats["is_ckan"] = True
+                        stats["datasets"] = aia_stats.get("datasets", 0)
+                        stats["organizations"] = aia_stats.get("organizations", 0)
+                        stats["groups"] = aia_stats.get("groups", 0)
+                        stats["version"] = aia_stats.get("version")
+                        stats["site_title"] = aia_stats.get("site_title")
+                        stats["requires_token"] = aia_stats.get("requires_token", False)
+                        stats["aia_repaired"] = True
+                        stats["ca_bundle"] = str(aia_bundle)
+                        stats["is_ssl_error"] = False
+                        stats["ssl_error"] = None
+                        stats["error"] = None
+                        stats["scheme"] = "https"
+            except Exception:
+                pass
+
+    # Enhancement 3: If primary was HTTPS and SSL failed (and not repaired by AIA), check if we can fall back to HTTP
+    if primary_scheme == "https" and not stats.get("is_ckan") and stats.get("is_ssl_error"):
         try:
-            http_url = f"http://{clean_host}"
+            http_url = f"http://{clean_host}{subpath}"
             http_stats = _probe_ckan_url(http_url, clean_host, headers, timeout=timeout, query=query)
             if http_stats.get("is_ckan"):
                 stats["is_ckan"] = True
@@ -1224,6 +1612,24 @@ def fetch_server_stats(
     if "interpreter shutdown" in err_str or "interrupted" in err_str:
         return stats
 
+    if stats.get("is_ckan"):
+        if stats.get("has_dcat") is None or not stats.get("extensions"):
+            exts_set = {str(e).strip().lower() for e in stats.get("extensions", []) if e}
+            if not exts_set:
+                known_exts = fetch_server_extensions(clean_host, repo_root=repo_root)
+                if known_exts:
+                    stats["extensions"] = sorted(known_exts)
+                    exts_set = known_exts
+            stats["has_dcat"] = any("dcat" in e for e in exts_set)
+            stats["has_schemaorg"] = any("structured_data" in e or "dcat" in e for e in exts_set)
+            stats["has_croissant"] = any("croissant" in e for e in exts_set)
+            stats["has_ddi"] = any("ddi" in e for e in exts_set)
+    else:
+        stats["has_dcat"] = False
+        stats["has_schemaorg"] = False
+        stats["has_croissant"] = False
+        stats["has_ddi"] = False
+
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         stats_to_save = dict(stats)
@@ -1234,6 +1640,133 @@ def fetch_server_stats(
         pass
 
     return stats
+
+
+def fetch_server_extensions(
+    host: str,
+    verbose: bool = False,
+    api_token: str | None = None,
+    repo_root: Path | None = None,
+    timeout: int = 10,
+) -> set[str] | None:
+    """Query CKAN status_show or ecosystem directory to discover deployed extensions.
+
+    Returns a set of lowercase extension identifiers, or None if extensions cannot be determined.
+    """
+    clean_host = host.replace("https://", "").replace("http://", "").split("/")[0]
+
+    # 1. Check stats cache if available
+    env_repo = (
+        os.environ.get("DARTFX_CKAN_REPOSITORY_ROOT")
+        or os.environ.get("DARTFX_CKAN_REPOSITORY")
+        or os.environ.get("CKAN_REPOSITORY_ROOT")
+        or os.environ.get("CKAN_REPOSITORY")
+    )
+    target_repo = repo_root or (Path(env_repo) if env_repo else (Path.cwd() / ".cache"))
+    cache_file = target_repo / clean_host / ".stats_cache.json"
+    if cache_file.exists():
+        try:
+            with open(cache_file, encoding="utf-8") as f:
+                cdata = json.load(f)
+                cached_exts = cdata.get("extensions")
+                if isinstance(cached_exts, list) and cached_exts:
+                    exts = {str(e).strip().lower() for e in cached_exts if e}
+                    if verbose:
+                        console.print(
+                            f"[dim]  [API] Cached extensions for {clean_host}: {', '.join(sorted(exts))}[/dim]"
+                        )
+                    return exts
+        except Exception:
+            pass
+
+    # 2. Probe status_show
+    base_host = f"https://{clean_host}" if not host.startswith("http") else host
+    url = f"{base_host}/api/3/action/status_show"
+    headers = get_request_headers(host=clean_host, api_token=api_token, repo_root=repo_root)
+
+    verify: str | bool = True
+    cached_bundle = get_ca_bundle_for_host(clean_host)
+    if cached_bundle:
+        verify = cached_bundle
+
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout, verify=verify)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict) and data.get("success"):
+                result = data.get("result", {})
+                if isinstance(result, dict):
+                    raw_exts = result.get("extensions", [])
+                    if isinstance(raw_exts, list) and raw_exts:
+                        exts = {str(e).strip().lower() for e in raw_exts if e}
+                        if verbose:
+                            console.print(
+                                f"[dim]  [API] Discovered extensions on {clean_host}: {', '.join(sorted(exts))}[/dim]"
+                            )
+                        return exts
+                    elif isinstance(raw_exts, str) and raw_exts:
+                        exts = {e.strip().lower() for e in raw_exts.split(",") if e.strip()}
+                        if verbose:
+                            console.print(
+                                f"[dim]  [API] Discovered extensions on {clean_host}: {', '.join(sorted(exts))}[/dim]"
+                            )
+                        return exts
+    except Exception as e:
+        if verbose:
+            console.print(f"[dim]  [API] Failed probing status_show extensions on {clean_host}: {e}[/dim]")
+
+    # 3. Fallback to ecosystem installation directory
+    try:
+        installations = fetch_ckan_installations()
+        for inst in installations:
+            if inst.clean_hostname == clean_host or inst.url == host:
+                if isinstance(inst.extensions, list) and inst.extensions:
+                    exts = {str(e).strip().lower() for e in inst.extensions if e}
+                    if verbose:
+                        console.print(
+                            f"[dim]  [Ecosystem] Known extensions for {clean_host}: {', '.join(sorted(exts))}[/dim]"
+                        )
+                    return exts
+                elif isinstance(inst.extensions, str) and inst.extensions:
+                    exts = {e.strip().lower() for e in inst.extensions.split(",") if e.strip()}
+                    if verbose:
+                        console.print(
+                            f"[dim]  [Ecosystem] Known extensions for {clean_host}: {', '.join(sorted(exts))}[/dim]"
+                        )
+                    return exts
+                break
+    except Exception:
+        pass
+
+    return None
+
+
+def is_format_supported_on_server(
+    fmt: str,
+    server_extensions: set[str] | None,
+    host: str | None = None,  # noqa: ARG001
+) -> bool:
+    """Check if a metadata format is supported based on server's deployed extensions.
+
+    Returns True if format is supported, or if server capabilities are unknown (fallback to runtime).
+    """
+    fmt_clean = fmt.strip().lower()
+    req_ext = FORMAT_EXTENSION_REQUIREMENTS.get(fmt_clean)
+    if req_ext is None:
+        return True
+
+    if server_extensions is None:
+        return True
+
+    if fmt_clean in ("schemaorg", "schema", "schema.org"):
+        return any("structured_data" in ext or "dcat" in ext for ext in server_extensions)
+    if fmt_clean in ("croissant", "mlcroissant"):
+        return any("croissant" in ext for ext in server_extensions)
+    if fmt_clean in ("ddi", "ddi-xml"):
+        return any("ddi" in ext for ext in server_extensions)
+
+    target = req_ext.lower().replace("ckanext-", "").replace("ckanext_", "")
+    return any(target in ext for ext in server_extensions)
 
 
 def display_server_stats(
@@ -1248,9 +1781,36 @@ def display_server_stats(
     workers: int = 8,
     installations: list[ServerInstallation] | None = None,
     console: Console | None = None,
-) -> None:
+    sort_by: str = "name",
+    descending: bool | None = None,
+    format: str = "table",
+    output: str | Path | None = None,
+    dcat: bool = False,
+    schemaorg: bool = False,
+    croissant: bool = False,
+    ddi: bool = False,
+) -> list[dict[str, Any]]:
     """Display live dataset and organization counts for CKAN servers."""
     target_console = console or Console()
+    clean_fmt = (format or "table").strip().lower()
+
+    out_path: Path | None = None
+    if output:
+        out_str = str(output).strip()
+        if out_str.lower() in ("auto", "__auto__", "-"):
+            ext_map = {
+                "json": "json",
+                "markdown": "md",
+                "md": "md",
+                "csv": "csv",
+                "table": "txt",
+            }
+            ext = ext_map.get(clean_fmt, "txt")
+            out_path = Path(f"dartfx-ckan.stats.{ext}")
+        else:
+            out_path = Path(out_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
     if installations is None:
         installations = fetch_ckan_installations(
             target_server=None if server.upper() == "ALL" else server,
@@ -1259,34 +1819,24 @@ def display_server_stats(
         )
 
     if not installations:
-        target_console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
-        return
-
-    table = Table(
-        title=f"CKAN Server Statistics ({len(installations)} servers)",
-        header_style="bold cyan",
-        show_header=True,
-    )
-    table.add_column("Server", style="cyan", no_wrap=True)
-    table.add_column("Country", style="green", justify="center")
-    table.add_column("Live Ver", justify="center", no_wrap=True)
-    table.add_column("Dataset Ver", justify="center", no_wrap=True)
-    table.add_column("Datasets", justify="right", style="cyan")
-    table.add_column("Organizations", justify="right", style="yellow")
-    table.add_column("Latency", justify="center")
-    table.add_column("Status", justify="left")
-
-    def _format_count(val: Any) -> str:
-        if val is None or val == "-":
-            return "-"
-        if isinstance(val, int | float):
-            return f"{int(val):,}"
-        if isinstance(val, str):
-            clean = val.replace(",", "").strip()
-            if clean.isdigit():
-                return f"{int(clean):,}"
-            return val
-        return str(val)
+        if out_path:
+            if clean_fmt == "json":
+                out_path.write_text("[]\n", encoding="utf-8")
+            elif clean_fmt in ("markdown", "md"):
+                out_path.write_text("No CKAN servers found.\n", encoding="utf-8")
+            elif clean_fmt == "csv":
+                out_path.write_text("", encoding="utf-8")
+            else:
+                out_path.write_text(f"No CKAN servers found matching filter '{server}'.\n", encoding="utf-8")
+            target_console.print(f"[bold green]✓ Statistics saved to:[/] {out_path}")
+        else:
+            if clean_fmt == "json":
+                target_console.print("[]")
+            elif clean_fmt in ("markdown", "md"):
+                target_console.print("No CKAN servers found.")
+            elif clean_fmt == "table":
+                target_console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
+        return []
 
     def _query_stat(inst: ServerInstallation) -> tuple[ServerInstallation, dict[str, Any]]:
         host_to_query = inst.url if inst.url else (inst.clean_hostname or "")
@@ -1301,6 +1851,9 @@ def display_server_stats(
         )
         return inst, s
 
+    stat_results: list[tuple[ServerInstallation, dict[str, Any]]] = []
+
+    stderr_console = Console(stderr=True)
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[bold green]{task.description}"),
@@ -1309,7 +1862,7 @@ def display_server_stats(
         MofNCompleteColumn(),
         TimeRemainingColumn(),
         TextColumn("[dim]{task.fields[server]}[/dim]"),
-        console=target_console,
+        console=stderr_console,
         transient=True,
     )
 
@@ -1323,70 +1876,385 @@ def display_server_stats(
                 inst, stat = future.result()
                 if stat.get("error") == "Interrupted":
                     continue
+                stat_results.append((inst, stat))
                 progress.update(task_id, advance=1, server=inst.clean_hostname or "")
-                server_disp = inst.clean_hostname or inst.name or "N/A"
-                home_url = inst.url
-                if stat.get("http_fallback") and home_url.startswith("https://"):
-                    home_url = "http://" + home_url[len("https://") :]
-                elif stat.get("https_available") and home_url.startswith("http://"):
-                    home_url = "https://" + home_url[len("http://") :]
-
-                clickable_host = f"[link={home_url}]{server_disp}[/link]" if home_url else server_disp
-                cc = inst.country_code or "-"
-                is_ckan = bool(stat.get("is_ckan"))
-                live_v = format_version(stat.get("version")) if is_ckan and stat.get("version") else "-"
-                cat_v = format_version(inst.version)
-
-                if live_v != "-" and cat_v != "-":
-                    if live_v == cat_v:
-                        live_disp = f"[green]{live_v}[/green]"
-                        cat_disp = f"[dim]{cat_v}[/dim]"
-                    else:
-                        live_disp = f"[bold cyan]{live_v}[/bold cyan]"
-                        cat_disp = f"[yellow]{cat_v}[/yellow]"
-                elif live_v != "-":
-                    live_disp = f"[green]{live_v}[/green]"
-                    cat_disp = "[dim]-[/dim]"
-                else:
-                    live_disp = "[dim]-[/dim]"
-                    cat_disp = f"[dim]{cat_v}[/dim]" if cat_v != "-" else "[dim]-[/dim]"
-
-                datasets_disp = _format_count(stat.get("datasets", 0)) if is_ckan else "-"
-                orgs_disp = _format_count(stat.get("organizations", 0)) if is_ckan else "-"
-
-                lat = stat.get("latency_seconds")
-                is_err = bool(stat.get("error"))
-                req_tok = bool(stat.get("requires_token"))
-
-                lat_badge = format_response_latency(lat, is_online=is_ckan, requires_token=req_tok, is_error=is_err)
-
-                if not is_ckan:
-                    if stat.get("error"):
-                        status_text = f"[red]{abbreviate_error(str(stat['error']))}[/red]"
-                    else:
-                        status_text = "[red]Not CKAN Server[/red]"
-                elif stat.get("http_fallback"):
-                    status_text = "[yellow]HTTP (SSL Failed)[/yellow]"
-                elif stat.get("https_upgrade_recommended"):
-                    status_text = "[cyan]Online (HTTPS Avail)[/cyan]"
-                elif req_tok:
-                    status_text = "[yellow]Auth Required[/yellow]"
-                elif stat.get("cached"):
-                    status_text = "[dim cyan]Cached (24h)[/dim cyan]"
-                else:
-                    status_text = "[green]Online[/green]"
-
-                table.add_row(clickable_host, cc, live_disp, cat_disp, datasets_disp, orgs_disp, lat_badge, status_text)
     except (KeyboardInterrupt, SystemExit):
         executor.shutdown(wait=False, cancel_futures=True)
         target_console.print("\n[yellow]Querying cancelled by user (Ctrl-C).[/yellow]")
-        if table.rows:
-            target_console.print(table)
-        return
+        return []
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    target_console.print(table)
+    if dcat:
+        stat_results = [item for item in stat_results if item[1].get("has_dcat")]
+    if schemaorg:
+        stat_results = [item for item in stat_results if item[1].get("has_schemaorg")]
+    if croissant:
+        stat_results = [item for item in stat_results if item[1].get("has_croissant")]
+    if ddi:
+        stat_results = [item for item in stat_results if item[1].get("has_ddi")]
+
+    def _format_count(val: Any) -> str:
+        if val is None or val == "-":
+            return "-"
+        if isinstance(val, int | float):
+            return f"{int(val):,}"
+        if isinstance(val, str):
+            clean = val.replace(",", "").strip()
+            if clean.isdigit():
+                return f"{int(clean):,}"
+            return val
+        return str(val)
+
+    clean_sort = (sort_by or "name").strip().lower()
+    if descending is not None:
+        reverse_sort = descending
+    elif clean_sort in ("datasets", "dataset", "count", "organizations", "orgs"):
+        reverse_sort = True
+    else:
+        reverse_sort = False
+
+    def _sort_key(item: tuple[ServerInstallation, dict[str, Any]]) -> Any:
+        inst, stat = item
+        if clean_sort in ("name", "server"):
+            return (inst.name or inst.clean_hostname or "").lower()
+        elif clean_sort in ("country", "cc"):
+            return (inst.country_code or "ZZ").lower()
+        elif clean_sort in ("datasets", "dataset", "count"):
+            try:
+                return int(stat.get("datasets") or 0)
+            except (ValueError, TypeError):
+                return 0
+        elif clean_sort in ("organizations", "orgs"):
+            try:
+                return int(stat.get("organizations") or 0)
+            except (ValueError, TypeError):
+                return 0
+        elif clean_sort in ("latency", "lat", "time"):
+            lat = stat.get("latency_seconds")
+            return float(lat) if lat is not None else 9999.0
+        elif clean_sort in ("status", "state"):
+            return str(stat.get("error") or "online").lower()
+        return (inst.name or inst.clean_hostname or "").lower()
+
+    stat_results.sort(key=_sort_key, reverse=reverse_sort)
+
+    records: list[dict[str, Any]] = []
+    for inst, stat in stat_results:
+        is_err = bool(stat.get("error"))
+        is_ckan = bool(stat.get("is_ckan"))
+        req_tok = bool(stat.get("requires_token"))
+        lat = stat.get("latency_seconds")
+
+        if not is_ckan:
+            if stat.get("error"):
+                plain_status = abbreviate_error(str(stat["error"]))
+            else:
+                plain_status = "Not CKAN Server"
+        elif stat.get("aia_repaired"):
+            plain_status = "Online (AIA Fixed)"
+        elif stat.get("http_fallback"):
+            plain_status = "HTTP (SSL Failed)"
+        elif stat.get("https_upgrade_recommended"):
+            plain_status = "Online (HTTPS Avail)"
+        elif req_tok:
+            plain_status = "Auth Required"
+        elif stat.get("cached"):
+            plain_status = "Online (Cached)"
+        else:
+            plain_status = "Online"
+
+        live_v = format_version(stat.get("version")) if is_ckan and stat.get("version") else "-"
+        cat_v = format_version(inst.version)
+
+        raw_datasets = stat.get("datasets") if is_ckan else None
+        if raw_datasets is not None:
+            try:
+                datasets_int: int | None = int(str(raw_datasets).replace(",", "").strip())
+            except (ValueError, TypeError):
+                datasets_int = None
+        else:
+            datasets_int = None
+
+        raw_orgs = stat.get("organizations") if is_ckan else None
+        if raw_orgs is not None:
+            try:
+                orgs_int: int | None = int(str(raw_orgs).replace(",", "").strip())
+            except (ValueError, TypeError):
+                orgs_int = None
+        else:
+            orgs_int = None
+
+        availability = classify_server_availability(
+            status=plain_status,
+            is_ckan=is_ckan,
+            error=stat.get("error"),
+            requires_token=req_tok,
+        )
+
+        record: dict[str, Any] = {
+            "name": inst.name or inst.clean_hostname,
+            "url": inst.url,
+            "hostname": inst.clean_hostname,
+            "country": inst.country,
+            "country_code": inst.country_code,
+            "live_version": live_v if live_v != "-" else None,
+            "dataset_version": cat_v if cat_v != "-" else None,
+            "datasets": datasets_int,
+            "organizations": orgs_int,
+            "has_dcat": bool(stat.get("has_dcat")) if is_ckan else False,
+            "has_schemaorg": bool(stat.get("has_schemaorg")) if is_ckan else False,
+            "has_croissant": bool(stat.get("has_croissant")) if is_ckan else False,
+            "has_ddi": bool(stat.get("has_ddi")) if is_ckan else False,
+            "formats": [
+                fmt
+                for fmt, active in [
+                    ("dcat", stat.get("has_dcat")),
+                    ("schemaorg", stat.get("has_schemaorg")),
+                    ("croissant", stat.get("has_croissant")),
+                    ("ddi", stat.get("has_ddi")),
+                ]
+                if active
+            ]
+            if is_ckan
+            else [],
+            "latency_seconds": lat,
+            "status": plain_status,
+            "availability": availability,
+            "is_ckan": is_ckan,
+            "cached": bool(stat.get("cached")),
+            "aia_repaired": bool(stat.get("aia_repaired")),
+            "error": stat.get("error"),
+        }
+        records.append(record)
+
+    if clean_fmt == "json":
+        if out_path:
+            out_path.write_text(json.dumps(records, indent=2, default=str) + "\n", encoding="utf-8")
+            target_console.print(f"[bold green]✓ Statistics saved to:[/] {out_path}")
+        else:
+            target_console.print_json(json.dumps(records, default=str))
+        return records
+
+    if clean_fmt in ("markdown", "md"):
+        md_lines: list[str] = [
+            (
+                "| Repository / Server | Country | Live Ver | Dataset Ver | "
+                "Datasets | Organizations | Formats | Latency | Status |"
+            ),
+            "|:---|:---:|:---:|:---:|---:|---:|:---:|:---:|:---|",
+        ]
+        for r, (_inst, stat) in zip(records, stat_results, strict=False):
+            name_disp = (r["name"] or "").replace("|", "\\|")
+            link_url = r["url"]
+            repo_cell = f"[{name_disp}]({link_url})" if link_url else name_disp
+            cc_cell = r["country_code"] or "-"
+            live_cell = r["live_version"] or "-"
+            cat_cell = r["dataset_version"] or "-"
+            datasets_cell = f"{r['datasets']:,}" if r["datasets"] is not None else "-"
+            orgs_cell = f"{r['organizations']:,}" if r["organizations"] is not None else "-"
+            fmts_cell = ", ".join(r["formats"]) if r["formats"] else "-"
+            lat_badge = format_response_latency(
+                r["latency_seconds"],
+                is_online=r["is_ckan"],
+                requires_token=bool(stat.get("requires_token")),
+                is_error=bool(stat.get("error")),
+            )
+            lat_cell = Text.from_markup(lat_badge).plain
+            status_cell = r["status"]
+            md_row = (
+                f"| {repo_cell} | {cc_cell} | {live_cell} | {cat_cell} "
+                f"| {datasets_cell} | {orgs_cell} | {fmts_cell} | {lat_cell} | {status_cell} |"
+            )
+            md_lines.append(md_row)
+
+        if len(records) > 1:
+            accessible_count = sum(1 for r in records if r.get("availability") == "accessible")
+            restricted_count = sum(1 for r in records if r.get("availability") == "restricted")
+            offline_count = sum(1 for r in records if r.get("availability") == "offline")
+            total_datasets = sum(int(r.get("datasets") or 0) for r in records if r.get("is_ckan"))
+            md_lines.append("")
+            md_lines.append(
+                f"_Summary: {accessible_count} accessible • {restricted_count} restricted • "
+                f"{offline_count} offline/inactive ({len(records)} servers) • "
+                f"{total_datasets:,} total datasets indexed._"
+            )
+
+        if out_path:
+            out_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+            target_console.print(f"[bold green]✓ Statistics saved to:[/] {out_path}")
+        else:
+            print("\n".join(md_lines))
+        return records
+
+    if clean_fmt == "csv":
+        fieldnames = [
+            "name",
+            "url",
+            "hostname",
+            "country",
+            "country_code",
+            "live_version",
+            "dataset_version",
+            "datasets",
+            "organizations",
+            "formats",
+            "has_dcat",
+            "has_schemaorg",
+            "has_croissant",
+            "has_ddi",
+            "latency_seconds",
+            "status",
+            "availability",
+        ]
+        if out_path:
+            with open(out_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                for r in records:
+                    row_dict = dict(r)
+                    if isinstance(row_dict.get("formats"), list):
+                        row_dict["formats"] = ", ".join(row_dict["formats"])
+                    writer.writerow(row_dict)
+            target_console.print(f"[bold green]✓ Statistics saved to:[/] {out_path}")
+        else:
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for r in records:
+                row_dict = dict(r)
+                if isinstance(row_dict.get("formats"), list):
+                    row_dict["formats"] = ", ".join(row_dict["formats"])
+                writer.writerow(row_dict)
+        return records
+
+    # Default: Rich Table
+    table = Table(
+        title=f"CKAN Server Statistics ({len(installations)} servers)",
+        header_style="bold cyan",
+        show_header=True,
+    )
+    table.add_column("Server", style="cyan", no_wrap=True)
+    table.add_column("Country", style="green", justify="center")
+    table.add_column("Live Ver", justify="center", no_wrap=True)
+    table.add_column("Dataset Ver", justify="center", no_wrap=True)
+    table.add_column("Datasets", justify="right", style="cyan")
+    table.add_column("Organizations", justify="right", style="yellow")
+    table.add_column("Formats", justify="center")
+    table.add_column("Latency", justify="center")
+    table.add_column("Status", justify="left")
+
+    if len(records) > 1:
+        accessible_count = sum(1 for r in records if r.get("availability") == "accessible")
+        restricted_count = sum(1 for r in records if r.get("availability") == "restricted")
+        offline_count = sum(1 for r in records if r.get("availability") == "offline")
+        total_datasets = sum(int(r.get("datasets") or 0) for r in records if r.get("is_ckan"))
+        dcat_count = sum(1 for r in records if r.get("has_dcat"))
+        schema_count = sum(1 for r in records if r.get("has_schemaorg"))
+        croissant_count = sum(1 for r in records if r.get("has_croissant"))
+        ddi_count = sum(1 for r in records if r.get("has_ddi"))
+        table.caption = (
+            f"[bold]Total:[/] [green]{accessible_count}[/green] accessible"
+            f" • [yellow]{restricted_count}[/yellow] restricted"
+            f" • [red]{offline_count}[/red] offline/inactive"
+            f" ({len(records)} servers)"
+            f" • [cyan]{total_datasets:,}[/cyan] datasets indexed\n"
+            f"[dim]Capabilities:[/] [blue]{dcat_count}[/blue] DCAT"
+            f" • [cyan]{schema_count}[/cyan] Schema.org"
+            f" • [magenta]{croissant_count}[/magenta] Croissant"
+            f" • [green]{ddi_count}[/green] DDI"
+        )
+
+    for _r, (inst, stat) in zip(records, stat_results, strict=False):
+        server_disp = inst.clean_hostname or inst.name or "N/A"
+        home_url = inst.url
+        if stat.get("http_fallback") and home_url and home_url.startswith("https://"):
+            home_url = "http://" + home_url[len("https://") :]
+        elif stat.get("https_available") and home_url and home_url.startswith("http://"):
+            home_url = "https://" + home_url[len("http://") :]
+
+        clickable_host = f"[link={home_url}]{server_disp}[/link]" if home_url else server_disp
+        cc = inst.country_code or "-"
+        is_ckan = bool(stat.get("is_ckan"))
+        live_v = format_version(stat.get("version")) if is_ckan and stat.get("version") else "-"
+        cat_v = format_version(inst.version)
+
+        if live_v != "-" and cat_v != "-":
+            if live_v == cat_v:
+                live_disp = f"[green]{live_v}[/green]"
+                cat_disp = f"[dim]{cat_v}[/dim]"
+            else:
+                live_disp = f"[bold cyan]{live_v}[/bold cyan]"
+                cat_disp = f"[yellow]{cat_v}[/yellow]"
+        elif live_v != "-":
+            live_disp = f"[green]{live_v}[/green]"
+            cat_disp = "[dim]-[/dim]"
+        else:
+            live_disp = "[dim]-[/dim]"
+            cat_disp = f"[dim]{cat_v}[/dim]" if cat_v != "-" else "[dim]-[/dim]"
+
+        datasets_disp = _format_count(stat.get("datasets", 0)) if is_ckan else "-"
+        orgs_disp = _format_count(stat.get("organizations", 0)) if is_ckan else "-"
+
+        fmt_badges = []
+        if is_ckan:
+            if stat.get("has_dcat"):
+                fmt_badges.append("[blue]DCAT[/blue]")
+            if stat.get("has_schemaorg"):
+                fmt_badges.append("[cyan]Schema[/cyan]")
+            if stat.get("has_croissant"):
+                fmt_badges.append("[magenta]Croissant[/magenta]")
+            if stat.get("has_ddi"):
+                fmt_badges.append("[green]DDI[/green]")
+        formats_disp = " ".join(fmt_badges) if fmt_badges else "[dim]-[/dim]"
+
+        lat = stat.get("latency_seconds")
+        is_err = bool(stat.get("error"))
+        req_tok = bool(stat.get("requires_token"))
+
+        lat_badge = format_response_latency(lat, is_online=is_ckan, requires_token=req_tok, is_error=is_err)
+
+        if not is_ckan:
+            if stat.get("error"):
+                abbr = abbreviate_error(str(stat["error"]))
+                abbr_low = abbr.lower()
+                if any(k in abbr_low for k in ["waf", "cloudflare", "perimeter", "auth", "token"]):
+                    status_text = f"[yellow]{abbr}[/yellow]"
+                elif any(k in abbr_low for k in ["retired", "for sale"]):
+                    status_text = f"[magenta]{abbr}[/magenta]"
+                elif "not ckan" in abbr_low or "not found" in abbr_low:
+                    status_text = f"[dim red]{abbr}[/dim red]"
+                else:
+                    status_text = f"[red]{abbr}[/red]"
+            else:
+                status_text = "[red]Not CKAN Server[/red]"
+        elif stat.get("aia_repaired"):
+            status_text = "[cyan]Online (AIA Fixed)[/cyan]"
+        elif stat.get("http_fallback"):
+            status_text = "[yellow]HTTP (SSL Failed)[/yellow]"
+        elif stat.get("https_upgrade_recommended"):
+            status_text = "[cyan]Online (HTTPS Avail)[/cyan]"
+        elif req_tok:
+            status_text = "[yellow]Auth Required[/yellow]"
+        elif stat.get("cached"):
+            status_text = "[dim cyan]Online (Cached)[/dim cyan]"
+        else:
+            status_text = "[green]Online[/green]"
+
+        table.add_row(
+            clickable_host, cc, live_disp, cat_disp, datasets_disp, orgs_disp, formats_disp, lat_badge, status_text
+        )
+
+    if out_path:
+        buf = io.StringIO()
+        file_console = Console(file=buf, color_system=None, width=120)
+        file_console.print(table)
+        plain_text = buf.getvalue()
+        out_path.write_text(plain_text, encoding="utf-8")
+        target_console.print(f"[bold green]✓ Statistics saved to:[/] {out_path}")
+    else:
+        target_console.print(table)
+
+    return records
 
 
 def fetch_active_datasets(
@@ -1572,6 +2440,15 @@ def fetch_dataset_record(
     elif fmt in ("ttl", "turtle"):
         url = f"{base_url}/dataset/{encoded_id}.ttl"
         ext = ".dcat.ttl"
+    elif fmt in ("schemaorg", "schema", "schema.org"):
+        url = f"{base_url}/dataset/{encoded_id}.jsonld?profiles=schemaorg"
+        ext = ".schemaorg.jsonld"
+    elif fmt in ("croissant", "mlcroissant"):
+        url = f"{base_url}/dataset/{encoded_id}/croissant.jsonld"
+        ext = ".croissant.jsonld"
+    elif fmt in ("ddi", "ddi-xml"):
+        url = f"{base_url}/api/3/action/package_show?id={encoded_id}"
+        ext = ".ddi.xml"
     elif fmt == "resources":
         url = f"{base_url}/api/3/action/package_show?id={encoded_id}"
         ext = ".resources.json"
@@ -1594,10 +2471,44 @@ def fetch_dataset_record(
                 except Exception as e:
                     return None, ext, f"Failed to extract resources: {e}"
 
+            if fmt in ("ddi", "ddi-xml"):
+                try:
+                    payload = r.json().get("result", {})
+                    resources_list = payload.get("resources", [])
+                    ddi_res = None
+                    for res in resources_list:
+                        fmt_res = str(res.get("format", "")).lower()
+                        mimetype = str(res.get("mimetype", "")).lower()
+                        url_res = str(res.get("url", "")).lower()
+                        if (
+                            "ddi" in fmt_res
+                            or "ddi" in url_res
+                            or (fmt_res == "xml" and "ddi" in str(res.get("description", "")).lower())
+                            or "ddi" in mimetype
+                        ):
+                            ddi_res = res
+                            break
+                    if not ddi_res:
+                        for res in resources_list:
+                            if str(res.get("format", "")).lower() == "xml" or str(res.get("url", "")).lower().endswith(
+                                ".xml"
+                            ):
+                                ddi_res = res
+                                break
+                    if not ddi_res or not ddi_res.get("url"):
+                        return None, ext, "No DDI XML resource attachment found in dataset"
+                    ddi_url = ddi_res["url"]
+                    res_r = requests.get(ddi_url, headers=headers, timeout=25)
+                    if res_r.status_code == 200 and res_r.content:
+                        return res_r.content, ext, None
+                    return None, ext, f"Failed to download DDI XML from {ddi_url} (HTTP {res_r.status_code})"
+                except Exception as e:
+                    return None, ext, f"Failed to extract DDI resource: {e}"
+
             content = r.content
             if content and len(content.strip()) > 0:
                 # If json format, pretty format it
-                if ext.endswith(".json"):
+                if ext.endswith(".json") or ext.endswith(".jsonld"):
                     try:
                         parsed = json.loads(content.decode("utf-8"))
                         content = json.dumps(parsed, indent=2).encode("utf-8")
@@ -1605,6 +2516,24 @@ def fetch_dataset_record(
                         pass
                 return content, ext, None
             return None, ext, "Empty metadata response from server (0 bytes)"
+
+        if r.status_code != 200 and fmt in ("schemaorg", "schema", "schema.org"):
+            try:
+                html_url = f"{base_url}/dataset/{encoded_id}"
+                html_r = requests.get(html_url, headers=headers, timeout=20)
+                if html_r.status_code == 200 and html_r.text:
+                    match = re.search(
+                        r'<script[^>]*type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>',
+                        html_r.text,
+                        re.DOTALL | re.IGNORECASE,
+                    )
+                    if match:
+                        snippet = match.group(1).strip()
+                        if snippet:
+                            parsed_json = json.loads(snippet)
+                            return json.dumps(parsed_json, indent=2).encode("utf-8"), ext, None
+            except Exception:
+                pass
 
         err_msg = _extract_http_error_reason(r)
         return None, ext, err_msg
@@ -1675,6 +2604,8 @@ class ServerHarvester:
                     "pid": pid,
                     "format": fmt,
                     "reason": err_msg or "Failed to fetch",
+                    "server": self.host,
+                    "url": format_dataset_url(pid, host=self.host),
                 }
             )
         else:
@@ -1759,6 +2690,8 @@ class ServerHarvester:
                         "pid": self.host,
                         "format": "-",
                         "reason": err_msg,
+                        "server": self.host,
+                        "url": format_dataset_url(self.host, host=self.host),
                     }
                 )
                 msg = f"Host '{self.host}' is unreachable or not a valid CKAN server: {err_msg}"
@@ -1769,11 +2702,36 @@ class ServerHarvester:
         manifest_records = self.manifest.get("records", {})
         existing_errors = self.manifest.get("errors", {})
 
+        # Probe deployed extensions and filter target formats
+        server_extensions = fetch_server_extensions(
+            self.host,
+            verbose=verbose,
+            api_token=api_token,
+            repo_root=self.server_dir.parent,
+        )
+        unsupported_formats: set[str] = set()
+
+        for fmt in target_formats:
+            if not is_format_supported_on_server(fmt, server_extensions, host=self.host):
+                unsupported_formats.add(fmt)
+                ext_name = FORMAT_EXTENSION_REQUIREMENTS.get(fmt) or "an extension"
+                available_str = (
+                    f" (deployed extensions: {', '.join(sorted(server_extensions))})" if server_extensions else ""
+                )
+                msg = (
+                    f"Format '{fmt}' requires '{ext_name}' which is not deployed on "
+                    f"{self.host}{available_str} - skipping."
+                )
+                console.print(f"  [bold yellow][!] {msg}[/bold yellow]")
+                file_logger.log(msg, level="WARNING")
+
+        active_target_formats = [f for f in target_formats if f not in unsupported_formats]
+
         # Track records to download
         to_download: list[tuple[str, str, str]] = []  # (pid, fmt, reason)
 
         for pid, _meta in active_datasets.items():
-            for fmt in target_formats:
+            for fmt in active_target_formats:
                 record_key = f"{pid}::{fmt}"
                 ext = get_format_extension(fmt)
                 file_path, _ = get_dataset_metadata_path(self.server_dir, pid, ext)
@@ -1862,10 +2820,10 @@ class ServerHarvester:
 
         # Detect deleted datasets if full catalog sync was run
         if not target_id and not query and not since_date and not limit:
-            active_keys = {f"{pid}::{fmt}" for pid in active_datasets for fmt in target_formats}
+            active_keys = {f"{pid}::{fmt}" for pid in active_datasets for fmt in active_target_formats}
             for rec_key in list(manifest_records.keys()):
                 fmt = rec_key.split("::")[1] if "::" in rec_key else "json"
-                if fmt in target_formats and rec_key not in active_keys:
+                if fmt in active_target_formats and rec_key not in active_keys:
                     stats["deleted"].append(rec_key)
                     if not dry_run:
                         del manifest_records[rec_key]
@@ -1876,8 +2834,20 @@ class ServerHarvester:
         return stats
 
 
-@app.command(name="harvest")
+@app.command(
+    name="harvest",
+    help=(
+        "Harvest and incrementally sync CKAN dataset metadata records into local storage "
+        "(applies strictly to metadata, not data payload files)."
+    ),
+)
 def harvest(
+    output_dir: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Repository root directory on local disk where server subdirectories will be created.",
+        ),
+    ] = None,
     server: Annotated[
         str,
         typer.Option(
@@ -1895,6 +2865,16 @@ def harvest(
             help="Filter servers by 2-letter ISO country code or country name.",
         ),
     ] = None,
+    package: Annotated[
+        str | None,
+        typer.Option(
+            "--package",
+            "--id",
+            "--pid",
+            "-p",
+            help="Target specific dataset package name or ID (e.g. gdp-per-capita).",
+        ),
+    ] = None,
     repo_dir: Annotated[
         str | None,
         typer.Option(
@@ -1910,19 +2890,21 @@ def harvest(
         ),
     ] = None,
     metadata_formats: Annotated[
-        str,
+        list[str] | None,
         typer.Option(
             "--format",
+            "--formats",
             "-f",
-            help="Metadata format(s) to harvest (json, dcat, jsonld, ttl, resources, or all).",
+            help="Metadata format(s) to harvest: json, dcat, jsonld, ttl, resources, or 'all' (metadata only).",
         ),
-    ] = "json",
+    ] = None,
     limit: Annotated[
-        int | None,
+        int,
         typer.Option(
             "--limit",
             "-l",
-            help="Maximum number of datasets to harvest per server (0 for unlimited).",
+            "-n",
+            help="Maximum number of dataset records to harvest per server (default: 10, set to 0 for unlimited).",
         ),
     ] = 10,
     workers: Annotated[
@@ -1931,14 +2913,15 @@ def harvest(
             "--workers",
             "--threads",
             "-w",
-            help="Number of concurrent worker threads for metadata downloads.",
+            help="Number of concurrent worker threads for metadata downloads (default: 4).",
         ),
     ] = 4,
     since: Annotated[
         str | None,
         typer.Option(
             "--since",
-            help="Only harvest datasets created or modified since ISO date (e.g. 2024-01-01).",
+            "--start-date",
+            help="Harvest datasets created or modified since specified date (YYYY-MM-DD).",
         ),
     ] = None,
     query: Annotated[
@@ -1946,28 +2929,31 @@ def harvest(
         typer.Option(
             "--query",
             "-q",
-            help="Filter datasets by keyword search query.",
+            help="Filter datasets by keyword search query (e.g. environment, economy).",
         ),
     ] = None,
     retry_errors: Annotated[
         bool,
         typer.Option(
             "--retry-errors",
-            help="Retry previously failed datasets recorded in manifests.",
+            "--retry",
+            help="Retry downloading datasets previously recorded with errors in .manifest.json.",
         ),
     ] = False,
     force_verify: Annotated[
         bool,
         typer.Option(
             "--force-verify",
-            help="Re-verify and download all records regardless of manifest cache.",
+            "--verify-sha256",
+            "--force-download",
+            help="Force downloading metadata and verifying SHA-256 for all records, bypassing fast cache.",
         ),
     ] = False,
     dry_run: Annotated[
         bool,
         typer.Option(
             "--dry-run",
-            help="Simulate harvesting run without modifying local storage.",
+            help="Preview additions, updates, and deletions without modifying local files.",
         ),
     ] = False,
     verbose: Annotated[
@@ -1975,48 +2961,124 @@ def harvest(
         typer.Option(
             "--verbose",
             "-v",
-            help="Enable verbose output.",
+            help="Enable detailed activity logging (HTTP requests, file paths, diff actions).",
         ),
     ] = False,
     refresh_catalog: Annotated[
         bool,
         typer.Option(
             "--refresh-catalog",
+            "--refresh",
             "-r",
-            help="Force a live catalog refresh, bypassing 24h cache.",
+            help="Force a live catalog refresh from the CKAN API, bypassing local 24-hour cache.",
         ),
     ] = False,
     cache_ttl: Annotated[
         int,
         typer.Option(
             "--cache-ttl",
-            help="Catalog cache expiration time in hours.",
+            help="Server dataset catalog cache expiration time in hours (default: 24).",
         ),
     ] = 24,
     api_token: Annotated[
         str | None,
         typer.Option(
             "--api-token",
+            "--key",
             "-k",
             envvar=["DARTFX_CKAN_API_KEY", "CKAN_API_KEY", "CKAN_API_TOKEN"],
-            help="CKAN API Token for authenticated endpoints.",
+            help="CKAN API Token / Key for repositories requiring authentication.",
         ),
     ] = None,
     log_file: Annotated[
         str | None,
         typer.Option(
             "--log-file",
-            help="Path to write execution activity log.",
+            help="Path to write execution activity log (default: harvester-YYYYMMDD-HHMMSS.log in repo directory).",
         ),
     ] = None,
 ) -> None:
-    """Harvest and incrementally sync CKAN metadata records into local storage."""
-    global file_logger
-    if log_file:
-        file_logger = HarvesterFileLogger(Path(log_file))
-
-    target_repo = Path(repo_dir) if repo_dir else Path.cwd()
+    """Harvest and incrementally sync CKAN metadata records across servers into local directory structures."""
+    target_repo = output_dir or (Path(repo_dir) if repo_dir else None)
+    if not target_repo:
+        env_repo = (
+            os.environ.get("DARTFX_CKAN_REPOSITORY_ROOT")
+            or os.environ.get("DARTFX_CKAN_REPOSITORY")
+            or os.environ.get("CKAN_REPOSITORY_ROOT")
+            or os.environ.get("CKAN_REPOSITORY")
+        )
+        target_repo = Path(env_repo) if env_repo else Path.cwd()
+    target_repo = target_repo.resolve()
     target_repo.mkdir(parents=True, exist_ok=True)
+
+    parsed_formats = normalize_formats(metadata_formats) or ["json"]
+
+    timestamp_str = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    if log_file:
+        log_file_path = Path(log_file).resolve()
+    else:
+        log_file_path = target_repo / f"harvester-{timestamp_str}.log"
+
+    global file_logger
+    file_logger = HarvesterFileLogger(log_file_path)
+
+    effective_limit = None if limit == 0 else limit
+    console = Console()
+
+    file_logger.log("================================================================================")
+    file_logger.log("CKAN Metadata Harvester & Sync Execution Started")
+    file_logger.log(f"Execution Log File: {log_file_path}")
+    file_logger.log("--------------------------------------------------------------------------------")
+    file_logger.log(f"Repository Root Output: {target_repo}")
+    file_logger.log(f"Target Server: {server}")
+    file_logger.log(f"Target Dataset / Package: {package if package else '(None)'}")
+    file_logger.log(f"Country Filter: {country if country else '(None)'}")
+    file_logger.log(f"Metadata Formats: {', '.join(parsed_formats)}")
+    file_logger.log(f"Since Date Filter: {since if since else '(All Time)'}")
+    file_logger.log(f"Search Query Filter: {query if query else '(None)'}")
+    file_logger.log(f"Record Limit: {effective_limit if effective_limit is not None else '(Unlimited)'}")
+    file_logger.log(f"Concurrency Workers: {workers}")
+    file_logger.log(f"Catalog Cache: {'Refreshed (forced)' if refresh_catalog else f'Enabled ({cache_ttl}h TTL)'}")
+    file_logger.log(
+        f"Incremental Verification: {'Full SHA-256 Download' if force_verify else 'Fast Timestamp/Manifest Check'}"
+    )
+    file_logger.log(f"Retry Manifest Errors: {retry_errors}")
+    file_logger.log(f"Dry Run Mode: {dry_run}")
+    file_logger.log(f"Verbose Logging: {verbose}")
+    file_logger.log("================================================================================")
+
+    console.print(
+        Panel.fit(
+            "[bold green]CKAN Metadata Harvester & Sync CLI[/bold green]",
+            border_style="cyan",
+        )
+    )
+
+    config_table = Table(show_header=False, box=None)
+    config_table.add_column("Key", style="bold cyan")
+    config_table.add_column("Value", style="yellow")
+    config_table.add_row("Repository Root Output", str(target_repo))
+    config_table.add_row("Execution Log File", str(log_file_path))
+    config_table.add_row("Target Server", server)
+    config_table.add_row("Target Dataset / Package", package if package else "(None)")
+    config_table.add_row("Country Filter", country if country else "(None)")
+    config_table.add_row("Metadata Formats", ", ".join(parsed_formats))
+    config_table.add_row("Since Date Filter", since if since else "(All Time)")
+    config_table.add_row("Search Query Filter", query if query else "(None)")
+    config_table.add_row(
+        "Record Limit / Server", str(effective_limit) if effective_limit is not None else "(Unlimited)"
+    )
+    config_table.add_row("Concurrency Workers", str(workers))
+    config_table.add_row("Catalog Cache", "Refreshed (forced)" if refresh_catalog else f"Enabled ({cache_ttl}h TTL)")
+    config_table.add_row(
+        "Incremental Check", "Full SHA-256 Download Verification" if force_verify else "Fast Timestamp/Manifest Check"
+    )
+    config_table.add_row("Retry Manifest Errors", str(retry_errors))
+    config_table.add_row("Dry Run Mode", str(dry_run))
+    config_table.add_row("Verbose Logging", str(verbose))
+
+    console.print(config_table)
+    console.print()
 
     installations = fetch_ckan_installations(
         target_server=None if server.upper() == "ALL" else server,
@@ -2026,25 +3088,13 @@ def harvest(
 
     if not installations:
         console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
-        return
+        raise typer.Exit(code=1)
 
-    console.print(
-        Panel(
-            f"[bold green]Starting CKAN Harvest[/bold green]\n"
-            f"Servers: [cyan]{len(installations)}[/cyan]  |  "
-            f"Formats: [yellow]{metadata_formats}[/yellow]  |  "
-            f"Limit: [magenta]{limit if limit else 'Unlimited'}[/magenta]  |  "
-            f"Repo: [dim]{target_repo}[/dim]",
-            title="[bold blue]dartfx-ckan harvester[/bold blue]",
-            expand=False,
-        )
-    )
+    console.print(f"[bold green]Found {len(installations)} CKAN server(s) matching criteria.[/bold green]\n")
 
-    total_added = 0
-    total_updated = 0
-    total_unchanged = 0
-    total_deleted = 0
-    total_errors = 0
+    overall_stats = {"datasets": 0, "added": 0, "updated": 0, "deleted": 0, "unchanged": 0, "errors": 0}
+    summary_rows = []
+    all_errors: list[dict[str, Any]] = []
 
     progress = Progress(
         SpinnerColumn(),
@@ -2054,68 +3104,230 @@ def harvest(
         MofNCompleteColumn(),
         TimeRemainingColumn(),
         console=console,
+        redirect_stdout=False,
+        redirect_stderr=False,
     )
 
     with progress:
-        overall_task = progress.add_task("[bold cyan]Syncing Servers...", total=len(installations))
+        server_task = progress.add_task("[bold cyan]Syncing Servers...", total=len(installations))
 
         for inst in installations:
             host = inst.clean_hostname
-            harvester = ServerHarvester(host, target_repo)
+            country_name = inst.country or "-"
+            progress.update(server_task, description=f"[bold yellow]Syncing {host}...[/bold yellow]")
 
-            server_task = progress.add_task(f"[dim]Syncing {host}[/dim]", total=100)
-
-            def _progress_cb(
-                completed: int,
-                total: int,
-                record_name: str,
-                task_id: Any = server_task,
-                srv_host: str = host,
-            ) -> None:
-                if total > 0:
-                    progress.update(
-                        task_id,
-                        completed=int((completed / total) * 100),
-                        description=f"[dim]{srv_host}: {record_name}[/dim]",
-                    )
-
-            stats = harvester.sync(
-                query=query,
-                since_date=since,
-                dry_run=dry_run,
-                limit=limit,
-                metadata_formats=metadata_formats,
-                verbose=verbose,
-                refresh_catalog=refresh_catalog,
-                cache_ttl_hours=float(cache_ttl),
-                retry_errors=retry_errors,
-                force_verify=force_verify,
-                api_token=api_token,
-                progress_callback=_progress_cb,
-                workers=workers,
+            dataset_task = progress.add_task(
+                f"  [dim cyan]Querying dataset catalog on {host}...[/dim cyan]", total=1, visible=True
             )
 
-            total_added += len(stats["added"])
-            total_updated += len(stats["updated"])
-            total_unchanged += len(stats["unchanged"])
-            total_deleted += len(stats["deleted"])
-            total_errors += len(stats["errors"])
+            def on_catalog_progress(retrieved_count: int, total_count: int, task_id=dataset_task, srv_host=host):
+                if total_count > 0:
+                    desc = f"  [cyan]Cataloging {srv_host}: {retrieved_count:,}/{total_count:,} datasets[/cyan]"
+                    progress.update(
+                        task_id,
+                        total=total_count,
+                        completed=retrieved_count,
+                        description=desc,
+                        visible=True,
+                    )
 
-            progress.remove_task(server_task)
-            progress.advance(overall_task)
+            def on_progress(completed: int, total: int, record_name: str, task_id=dataset_task, srv_host=host):
+                if total > 0:
+                    display_name = (record_name[:42] + "...") if len(record_name) > 45 else record_name
+                    progress.update(
+                        task_id,
+                        total=total,
+                        completed=completed,
+                        description=f"  [cyan]{srv_host}: {display_name}[/cyan]",
+                        visible=True,
+                    )
+
+            try:
+                if api_token:
+                    save_server_token(host, api_token, target_repo)
+                harvester = ServerHarvester(host, target_repo)
+                stats = harvester.sync(
+                    query=query,
+                    since_date=since,
+                    dry_run=dry_run,
+                    limit=effective_limit,
+                    metadata_formats=parsed_formats,
+                    verbose=verbose,
+                    target_id=package,
+                    refresh_catalog=refresh_catalog,
+                    cache_ttl_hours=float(cache_ttl),
+                    retry_errors=retry_errors,
+                    force_verify=force_verify,
+                    api_token=api_token,
+                    progress_callback=on_progress,
+                    catalog_progress_callback=on_catalog_progress,
+                    workers=workers,
+                )
+            except Exception as e:
+                stats = {
+                    "datasets": [],
+                    "added": [],
+                    "updated": [],
+                    "deleted": [],
+                    "unchanged": [],
+                    "errors": [
+                        {
+                            "key": host,
+                            "pid": host,
+                            "format": "-",
+                            "reason": str(e),
+                            "server": host,
+                            "url": f"https://{host}",
+                        }
+                    ],
+                }
+
+            num_datasets = len(stats.get("datasets", []))
+            num_added = len(stats.get("added", []))
+            num_updated = len(stats.get("updated", []))
+            num_unchanged = len(stats.get("unchanged", []))
+            num_deleted = len(stats.get("deleted", []))
+            num_errors = len(stats.get("errors", []))
+
+            overall_stats["datasets"] += num_datasets
+            overall_stats["added"] += num_added
+            overall_stats["updated"] += num_updated
+            overall_stats["unchanged"] += num_unchanged
+            overall_stats["deleted"] += num_deleted
+            overall_stats["errors"] += num_errors
+
+            all_errors.extend(stats.get("errors", []))
+
+            summary_rows.append(
+                (host, country_name, num_datasets, num_added, num_updated, num_unchanged, num_deleted, num_errors)
+            )
+
+            total_cnt = int(progress.tasks[dataset_task].total or 1)
+            progress.update(dataset_task, completed=max(1, total_cnt), visible=False)
+            progress.advance(server_task)
 
     # Render summary table
-    summary_table = Table(title="CKAN Harvest Summary", header_style="bold green")
-    summary_table.add_column("Category", style="cyan")
-    summary_table.add_column("Count", justify="right", style="bold white")
+    console.print("\n[bold green]================ Sync Summary Report ================[/bold green]\n")
+    results_table = Table(show_header=True, header_style="bold magenta")
+    results_table.add_column("CKAN Server", style="cyan")
+    results_table.add_column("Country", style="dim")
+    results_table.add_column("Datasets", style="bold yellow", justify="right")
+    results_table.add_column("Files Added (+)", style="green", justify="right")
+    results_table.add_column("Files Updated (Δ)", style="yellow", justify="right")
+    results_table.add_column("Files Unchanged (=)", style="dim cyan", justify="right")
+    results_table.add_column("Files Deleted (-)", style="red", justify="right")
+    results_table.add_column("Errors (!)", style="bold red", justify="right")
 
-    summary_table.add_row("Added Records", f"[green]+{total_added:,}[/green]")
-    summary_table.add_row("Updated Records", f"[yellow]~{total_updated:,}[/yellow]")
-    summary_table.add_row("Unchanged Records", f"[dim]={total_unchanged:,}[/dim]")
-    summary_table.add_row("Deleted Records", f"[red]-{total_deleted:,}[/red]")
-    summary_table.add_row("Errors", f"[bold red]!{total_errors:,}[/bold red]")
+    file_logger.log("================ Sync Summary Report ================")
+    for host, country_val, datasets_cnt, added, updated, unchanged, deleted, errors in summary_rows:
+        server_url = f"https://{host}" if not host.startswith("http") else host
+        clickable_host = f"[link={server_url}]{host}[/link]"
+        results_table.add_row(
+            clickable_host,
+            country_val or "Global",
+            str(datasets_cnt),
+            str(added),
+            str(updated),
+            str(unchanged),
+            str(deleted),
+            str(errors),
+        )
+        file_logger.log(
+            f"Server: {host} ({country_val or 'Global'}) | Datasets: {datasets_cnt} | Files Added: {added} | "
+            f"Files Updated: {updated} | Files Unchanged: {unchanged} | Files Deleted: {deleted} | Errors: {errors}"
+        )
 
-    console.print(summary_table)
+    console.print(results_table)
+
+    summary_panel_text = (
+        f"[bold cyan]Datasets Processed: {overall_stats['datasets']}[/bold cyan]\n"
+        f"[bold green]Files Added (+): {overall_stats['added']}[/bold green]  |  "
+        f"[bold yellow]Files Updated (Δ): {overall_stats['updated']}[/bold yellow]  |  "
+        f"[dim cyan]Files Unchanged (=): {overall_stats['unchanged']}[/dim cyan]  |  "
+        f"[bold red]Files Deleted (-): {overall_stats['deleted']}[/bold red]  |  "
+        f"[bold red]Total Errors (!): {overall_stats['errors']}[/bold red]"
+    )
+
+    console.print(
+        Panel(
+            summary_panel_text,
+            title="[bold]Harvest Completed[/bold]",
+            border_style="green" if overall_stats["errors"] == 0 else "yellow",
+        )
+    )
+    file_logger.log(
+        f"Datasets Processed: {overall_stats['datasets']} | Total Added (+): {overall_stats['added']} | "
+        f"Total Updated (Δ): {overall_stats['updated']} | Total Unchanged (=): {overall_stats['unchanged']} | "
+        f"Total Deleted (-): {overall_stats['deleted']} | Total Errors (!): {overall_stats['errors']}"
+    )
+
+    if all_errors:
+        console.print(f"\n[bold red]==== Harvesting Errors Report ({len(all_errors)} Failed) ====[/bold red]\n")
+
+        # 1. Error Type Breakdown Summary Table
+        type_counts: dict[str, int] = {}
+        for err in all_errors:
+            reason_str = err.get("reason", "") if isinstance(err, dict) else str(err)
+            etype = classify_harvest_error(reason_str)
+            type_counts[etype] = type_counts.get(etype, 0) + 1
+
+        sum_err_table = Table(
+            title="Harvest Errors: Summary by Error Type",
+            header_style="bold red",
+            show_header=True,
+        )
+        sum_err_table.add_column("Error Category / Type", style="cyan", no_wrap=False)
+        sum_err_table.add_column("Count", justify="right", style="bold red")
+        sum_err_table.add_column("% of Total", justify="right", style="yellow")
+
+        for etype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
+            pct = f"{(count / len(all_errors)) * 100:.1f}%"
+            sum_err_table.add_row(etype, str(count), pct)
+
+        console.print(sum_err_table)
+        console.print()
+
+        # 2. Detailed Error Table
+        err_table = Table(title="Failed Records Details", show_header=True, header_style="bold yellow")
+        err_table.add_column("Dataset / Package", style="cyan", no_wrap=True)
+        err_table.add_column("Format", style="yellow", justify="center", no_wrap=True)
+        err_table.add_column("Error Category", style="magenta")
+        err_table.add_column("Error Reason / Details", style="bold red", no_wrap=False)
+
+        file_logger.log(f"==== Harvesting Errors Report ({len(all_errors)} Failed) ====")
+
+        for err in all_errors:
+            dataset_url: str | None = None
+            if isinstance(err, dict):
+                pid_raw = err.get("pid") or err.get("key", "Unknown")
+                fmt_display = err.get("format", "-")
+                reason_display = err.get("reason", "Unknown error")
+                err_server = err.get("server") or (pid_raw.split(" (")[0] if " (" in str(pid_raw) else None)
+                dataset_url = str(err.get("url")) if err.get("url") else format_dataset_url(pid_raw, host=err_server)
+            else:
+                pid_raw = str(err)
+                fmt_display = "-"
+                reason_display = "Error occurred"
+                dataset_url = format_dataset_url(pid_raw)
+
+            cat_display = classify_harvest_error(reason_display)
+            pid_display = (
+                f"[link={dataset_url}]{pid_raw}[/link]" if dataset_url and pid_raw != "Unknown" else str(pid_raw)
+            )
+            err_table.add_row(pid_display, fmt_display, cat_display, reason_display)
+            file_logger.log(
+                f"PID: {pid_raw} | Format: {fmt_display} | Category: {cat_display} | Reason: {reason_display}",
+                level="ERROR",
+            )
+
+        console.print(err_table)
+        console.print()
+        console.print(
+            "[yellow]⚠️ Encountered harvest errors on some records. "
+            "Run [bold]dartfx-ckan errors --details[/bold] to inspect failure reasons across manifests.[/yellow]\n"
+        )
+
+    file_logger.log("Harvesting process completed.")
 
 
 if __name__ == "__main__":

@@ -91,6 +91,25 @@ def test_cli_installations_command(monkeypatch) -> None:
     assert "US" in result_csv.stdout
 
 
+def test_cli_list_command_alias(monkeypatch) -> None:
+    mock_insts = [
+        ServerInstallation(name="CKAN 1", hostname="ckan1.test", country="United States"),
+        ServerInstallation(name="CKAN 2", hostname="ckan2.test", country="United States"),
+    ]
+    monkeypatch.setattr("dartfx.ckan.cli.fetch_ckan_installations", lambda **_kwargs: mock_insts)
+
+    runner = CliRunner()
+    result_list = runner.invoke(app, ["list", "--country", "US", "--limit", "2", "--format", "json"])
+    assert result_list.exit_code == 0
+    data_list = json.loads(result_list.stdout)
+    assert len(data_list) == 2
+
+    result_inst = runner.invoke(app, ["installations", "--country", "US", "--limit", "2", "--format", "json"])
+    assert result_inst.exit_code == 0
+    data_inst = json.loads(result_inst.stdout)
+    assert data_list == data_inst
+
+
 def test_cli_smart_dash_normalization(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["dartfx-ckan", "stats", "-–country", "US", "—limit", "5"])
     _normalize_smart_dashes()
@@ -112,3 +131,7 @@ def test_cli_stats_command_flags() -> None:
     assert "-w" in clean_output
     assert "--repo-dir" in clean_output
     assert "-d" in clean_output
+    assert "--croissant" in clean_output
+    assert "--dcat" in clean_output
+    assert "--schemaorg" in clean_output
+    assert "--ddi" in clean_output

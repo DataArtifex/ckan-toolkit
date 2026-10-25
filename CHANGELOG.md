@@ -2,6 +2,37 @@
 
 ## [0.2.0]
 
+- Fixed server probe false negatives on rate-limited servers (such as `transportdata.be`) by adding automatic sequential retry for transient HTTP 503/429 concurrency bursts and POST method fallback for `organization_list` endpoints requiring POST.
+- Fixed HTTP error classification in `_probe_ckan_url` so 5xx and 429 response codes are properly identified as `Service Unavailable (503)`, `Rate Limited (429)`, or `Bad Gateway (502)` instead of defaulting to `Not CKAN Server`.
+- Fixed format capability reporting consistency in `stats` table and exports so capability badges and format arrays are strictly gated behind verified active CKAN servers (`is_ckan`), preventing contradictory format displays for inactive or offline hosts.
+- Added detection, reporting, and harvesting support for **Schema.org** (`schemaorg`), **MLCommons Croissant** (`croissant`), and **DDI** (`ddi`):
+  - Expanded `CKANServer.get_info_export_formats()` to detect and report `schemaorg` (Schema.org Dataset JSON-LD via `structured_data` or `ckanext-dcat`), `croissant` (MLCommons Croissant JSON-LD via `ckanext-dcat >= 2.3.0`), and `ddi` (DDI-Codebook 2.5 XML via `ckanext-ddi` or dataset resource distributions).
+  - Enhanced `dartfx-ckan info` to display availability, media types, required plugins, and harvestability status for all formats.
+  - Enhanced `dartfx-ckan stats` with a dedicated `Formats` column displaying active capability badges (`[DCAT]`, `[Schema]`, `[Croissant]`, `[DDI]`).
+  - Added format capability filtering options to `dartfx-ckan stats`: `--croissant`, `--dcat`, `--schemaorg`/`--schema`, and `--ddi`.
+  - Added aggregated ecosystem capability metrics (`Capabilities: X DCAT • Y Schema.org • Z Croissant • W DDI`) to `stats` table caption and Markdown summary.
+  - Added boolean capability flags (`has_dcat`, `has_schemaorg`, `has_croissant`, `has_ddi`) and `formats` array to JSON, Markdown, and CSV exports in `stats`.
+  - Expanded `harvest` command to harvest `schemaorg` (with automatic fallback to dataset HTML `<script type="application/ld+json">` scraping), `croissant`, and `ddi` (via automatic resource attachment extraction).
+- Added `list` command as an alias for `installations` in the CLI (`dartfx-ckan list`).
+- Enhanced `info` command to identify and display metadata export formats supported by the target CKAN server based on deployed extensions (`ckanext-dcat` for `dcat`, `jsonld`, `ttl`; Core CKAN for `json`, `resources`), including media types and harvestability status.
+- Added extension-aware metadata format verification to `harvest` (`fetch_server_extensions`, `is_format_supported_on_server`) to automatically detect missing extensions upfront and skip unsupported export formats with a clear warning instead of encountering runtime download errors.
+- Clarified and enforced that the `harvest` command applies strictly to metadata records (`.ckan.json`, `.dcat.xml`, `.dcat.jsonld`, `.dcat.ttl`, `.resources.json`) and does not harvest data payload files.
+- Brought CKAN `harvest` command up to par with `dataverse` and `nada` harvesters:
+  - Added positional repository output directory argument (`output_dir`) alongside `--repo-dir` / `-d` with automatic fallback to environment variables and current directory.
+  - Added target single dataset/package options: `--package`, `--id`, `--pid`, `-p` to sync individual records.
+  - Added full CLI option aliases: `--start-date` (`--since`), `--formats` (`--format`), `-n` (`--limit`), `--threads` (`--workers`), `--refresh` (`--refresh-catalog`), `--retry` (`--retry-errors`), `--verify-sha256` and `--force-download` (`--force-verify`), and `--key` (`--api-token`).
+  - Added automatic execution activity log generation (`harvester-YYYYMMDD-HHMMSS.log`) in the repository root directory (or `--log-file`).
+  - Added Rich execution configuration summary panel and parameter table prior to sync.
+  - Added two-level live progress tracking: per-server catalog query progress (`catalog_progress_callback`) and dataset download progress (`progress_callback`).
+  - Enhanced error resiliency across servers during sync runs so individual server failures do not abort multi-server harvesting.
+  - Added automatic server API token persistence via `save_server_token` when `--api-token` / `--key` is provided.
+  - Added per-server summary report table displaying clickable server URLs, country, datasets, additions (+), updates (Δ), unchanged (=), deletions (-), and errors (!).
+  - Added rich completion summary panel with colored status borders.
+  - Added automatic error diagnostic reporting on failures: summary table by error category (% of total), detailed records table with clickable dataset URLs, error categories, and failure reasons, and a helpful inspection tip.
+- Added Authority Information Access (AIA) intermediate CA certificate chasing (`resolve_aia_intermediate_ca`, `get_ca_bundle_for_host`) to automatically repair missing intermediate CA certificate chains for SSL/TLS resilience.
+- Added tri-state server availability classification (`classify_server_availability`: accessible, restricted, offline) and summary metrics to `stats` command.
+- Added JSON and Markdown output formats (`--format json|markdown`, `--json`, `--markdown`/`--md`) and file export (`-o`/`--output`) to `stats` command.
+- Enhanced `stats` command with sorting options (`--sort`, `--desc`, `--asc`) across name, datasets, organizations, country, latency, and status.
 - Added dual version columns (`Live Ver` and `Dataset Ver`) to `stats` command table to contrast live probed versions against ecosystem dataset versions with automatic upgrade highlighting.
 - Added subpath preservation (e.g. from `inst.url`) and automatic `/data` subpath fallback probing in `fetch_server_stats`, enabling accurate stats for subpath-mounted CKAN portals such as `data.gov.au/data`, `data.overheid.nl/data`, and `data.bris.ac.uk/data`.
 - Enhanced bot protection / WAF detection in `_probe_ckan_url` to detect HTML challenge signatures (Anubis, PerimeterX, Cloudflare, DDoS-Guard, etc.) across both HTTP 200 and 403 responses.

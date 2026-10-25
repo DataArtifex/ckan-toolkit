@@ -2,7 +2,9 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from rich.console import Console
 from typer.testing import CliRunner
 
 from dartfx.ckan.cli import app
@@ -41,7 +43,16 @@ def test_format_version() -> None:
 def test_normalize_formats() -> None:
     assert normalize_formats("json") == ["json"]
     assert normalize_formats("json,dcat,resources") == ["json", "dcat", "resources"]
-    assert normalize_formats("all") == ["json", "dcat", "jsonld", "ttl", "resources"]
+    assert normalize_formats("all") == [
+        "json",
+        "dcat",
+        "jsonld",
+        "ttl",
+        "resources",
+        "schemaorg",
+        "croissant",
+        "ddi",
+    ]
     assert normalize_formats("xml") == ["dcat"]
     assert normalize_formats("native") == ["json"]
     assert normalize_formats(None) == []
@@ -263,6 +274,13 @@ def test_cli_harvest_and_errors_help() -> None:
     assert "--workers" in clean1
     assert "--threads" in clean1
     assert "-w" in clean1
+    assert "--package" in clean1
+    assert "--since" in clean1
+    assert "--query" in clean1
+    assert "--refresh" in clean1
+    assert "--retry" in clean1
+    assert "--force-verify" in clean1
+    assert "--key" in clean1
 
     res2 = runner.invoke(app, ["errors", "--help"])
     assert res2.exit_code == 0
@@ -270,6 +288,116 @@ def test_cli_harvest_and_errors_help() -> None:
     assert "--by-format" in clean2
     assert "--by-server" in clean2
     assert "--details" in clean2
+
+
+def test_cli_harvest_dry_run_positional_and_target_package(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    repo_dir = tmp_path / "harvest_repo"
+
+    from dartfx.ckan.ckan import ServerInstallation
+
+    inst = ServerInstallation(
+        name="Demo CKAN",
+        hostname="demo.ckan.org",
+        url="https://demo.ckan.org",
+        country="Global",
+    )
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kw: [inst])
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_extensions", lambda *_args, **_kwargs: set())
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_active_datasets",
+        lambda *_args, **_kwargs: {"sample-dataset": {"name": "sample-dataset", "id": "id-sample"}},
+    )
+
+    # Run harvest with positional directory and specific package
+    res = runner.invoke(
+        app,
+        [
+            "harvest",
+            str(repo_dir),
+            "--server",
+            "demo.ckan.org",
+            "--package",
+            "sample-dataset",
+            "--format",
+            "json",
+            "--dry-run",
+        ],
+    )
+    assert res.exit_code == 0
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", res.stdout)
+    assert "CKAN Metadata Harvester & Sync CLI" in clean
+    assert "Repository Root Output" in clean
+    assert "sample-dataset" in clean
+
+    # Verify log file was automatically created in the repository root directory
+    log_files = list(repo_dir.glob("harvester-*.log"))
+    assert len(log_files) == 1
+    log_content = log_files[0].read_text(encoding="utf-8")
+    assert "CKAN Metadata Harvester & Sync Execution Started" in log_content
+    assert "Target Server: demo.ckan.org" in log_content
+    assert "Target Dataset / Package: sample-dataset" in log_content
+    assert "Sync Summary Report" in log_content
+
+
+def test_cli_harvest_error_reporting(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    repo_dir = tmp_path / "err_repo"
+
+    from dartfx.ckan.ckan import ServerInstallation
+
+    inst = ServerInstallation(
+        name="Test CKAN",
+        hostname="test.ckan.org",
+        url="https://test.ckan.org",
+        country="Canada",
+    )
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kw: [inst])
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_extensions", lambda *_args, **_kwargs: set())
+
+    # Mock fetch_active_datasets to return 1 dataset
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_active_datasets",
+        lambda *_args, **_kwargs: {"failing-dataset": {"name": "failing-dataset", "id": "id-err"}},
+    )
+
+    # Mock fetch_dataset_record to fail with 404
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_dataset_record",
+        lambda *_args, **_kwargs: (None, ".ckan.json", "HTTP 404: Not Found"),
+    )
+
+    res = runner.invoke(
+        app,
+        [
+            "harvest",
+            str(repo_dir),
+            "--server",
+            "test.ckan.org",
+            "--format",
+            "json",
+        ],
+    )
+    assert res.exit_code == 0
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", res.stdout)
+    assert "CKAN Metadata Harvester & Sync CLI" in clean
+    assert "Repository Root Output" in clean
+
+    log_files = list(repo_dir.glob("harvester-*.log"))
+    assert len(log_files) == 1
+    log_content = log_files[0].read_text(encoding="utf-8")
+    assert "Harvesting Errors Report (1 Failed)" in log_content
+    assert "failing-dataset" in log_content
+
+
+def test_cli_harvest_no_matching_servers(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kw: [])
+
+    res = runner.invoke(app, ["harvest", "--server", "nonexistent.example.org"])
+    assert res.exit_code == 1
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", res.stdout)
+    assert "No CKAN servers found matching filter 'nonexistent.example.org'" in clean
 
 
 def test_server_harvester_sync_multithreaded(tmp_path: Path, monkeypatch) -> None:
@@ -493,3 +621,471 @@ def test_display_server_stats_version_comparison(tmp_path: Path, monkeypatch) ->
     assert "v2.11.0" in output
     assert "v2.9.0" in output
     assert "v2.11.2" in output
+
+
+def test_classify_server_availability() -> None:
+    from dartfx.ckan.harvester import classify_server_availability
+
+    # Accessible
+    assert classify_server_availability(status="Online", is_ckan=True) == "accessible"
+    assert classify_server_availability(status="Online (AIA Fixed)", is_ckan=True) == "accessible"
+    assert classify_server_availability(status="Online (Cached)", is_ckan=True) == "accessible"
+    assert classify_server_availability(status="HTTP (SSL Failed)", is_ckan=True) == "accessible"
+
+    # Restricted
+    assert classify_server_availability(status="Auth Required", is_ckan=True, requires_token=True) == "restricted"
+    assert classify_server_availability(status="Cloudflare Challenge", error="Cloudflare Challenge") == "restricted"
+    assert (
+        classify_server_availability(status="Perimeter Block (Geo/IP)", error="Perimeter Block (Geo/IP)")
+        == "restricted"
+    )
+    assert classify_server_availability(status="Forbidden (403)", error="Forbidden (403)") == "restricted"
+
+    # Offline / Inactive
+    assert classify_server_availability(status="Timeout (10s)", error="Timeout (10s)") == "offline"
+    assert classify_server_availability(status="DNS Resolution Failure", error="DNS Resolution Failure") == "offline"
+    assert classify_server_availability(status="Domain For Sale", error="Domain For Sale") == "offline"
+    assert classify_server_availability(status="Catalog Retired (410)", error="Catalog Retired (410)") == "offline"
+    assert classify_server_availability(status="Not CKAN Server") == "offline"
+
+
+def test_get_ca_bundle_for_host(tmp_path: Path) -> None:
+    from dartfx.ckan.harvester import get_ca_bundle_for_host
+
+    # When file does not exist
+    assert get_ca_bundle_for_host("test.ckan.org", cache_dir=tmp_path) is None
+
+    # When file exists and non-empty
+    bundle_file = tmp_path / "test.ckan.org.pem"
+    bundle_file.write_text("-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----", encoding="utf-8")
+    assert get_ca_bundle_for_host("test.ckan.org", cache_dir=tmp_path) == str(bundle_file)
+
+
+def test_resolve_aia_intermediate_ca(tmp_path: Path, monkeypatch) -> None:
+    from dartfx.ckan.harvester import resolve_aia_intermediate_ca
+
+    mock_der = b"some_der_bytes\x00http://pki.example.org/intermediate.crt\x00more_bytes"
+
+    mock_sock = MagicMock()
+    mock_ssock = MagicMock()
+    mock_ssock.getpeercert.return_value = mock_der
+    mock_sock.__enter__.return_value = mock_sock
+    mock_ssock.__enter__.return_value = mock_ssock
+
+    monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: mock_sock)
+    mock_ctx = MagicMock()
+    mock_ctx.wrap_socket.return_value = mock_ssock
+    monkeypatch.setattr("ssl.create_default_context", lambda: mock_ctx)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"-----BEGIN CERTIFICATE-----\nMOCK_INTERMEDIATE\n-----END CERTIFICATE-----"
+    monkeypatch.setattr("requests.get", lambda _url, **_kwargs: mock_resp)
+
+    bundle_path = resolve_aia_intermediate_ca("test.ckan.org", cache_dir=tmp_path)
+    assert bundle_path is not None
+    assert bundle_path.exists()
+    content = bundle_path.read_text(encoding="utf-8")
+    assert "MOCK_INTERMEDIATE" in content
+
+
+def test_display_server_stats_shows_aia_fixed(monkeypatch) -> None:
+    from dartfx.ckan.ckan import ServerInstallation
+    from dartfx.ckan.harvester import display_server_stats
+
+    inst = ServerInstallation(
+        name="Test AIA CKAN Server",
+        hostname="data.example.gov",
+        url="https://data.example.gov",
+        country="United States",
+        country_code="US",
+    )
+
+    stat = {
+        "is_ckan": True,
+        "datasets": 120,
+        "organizations": 5,
+        "version": "2.10",
+        "latency_seconds": 1.2,
+        "aia_repaired": True,
+        "error": None,
+    }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kwargs: [inst])
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_stats", lambda *_args, **_kwargs: stat)
+
+    records = display_server_stats(server="data.example.gov", format="json")
+    assert len(records) == 1
+    assert records[0]["status"] == "Online (AIA Fixed)"
+    assert records[0]["aia_repaired"] is True
+
+
+def test_display_server_stats_json_and_markdown(monkeypatch, capsys) -> None:
+    from dartfx.ckan.ckan import ServerInstallation
+    from dartfx.ckan.harvester import display_server_stats
+
+    inst1 = ServerInstallation(name="US Data", hostname="data.gov", country_code="US")
+    inst2 = ServerInstallation(name="UK Data", hostname="data.gov.uk", country_code="GB")
+
+    mock_stats = {
+        "https://data.gov": {
+            "is_ckan": True,
+            "datasets": 250000,
+            "organizations": 100,
+            "latency_seconds": 1.1,
+            "version": "2.10",
+        },
+        "https://data.gov.uk": {
+            "is_ckan": True,
+            "datasets": 50000,
+            "organizations": 80,
+            "latency_seconds": 2.2,
+            "version": "2.9",
+        },
+    }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kwargs: [inst1, inst2])
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_server_stats",
+        lambda host, **_kwargs: mock_stats.get(host, {"is_ckan": False, "error": "Unknown"}),
+    )
+
+    # 1. Test JSON output
+    records = display_server_stats(format="json", sort_by="datasets", descending=True)
+    captured = capsys.readouterr()
+    assert len(records) == 2
+    assert records[0]["name"] == "US Data"
+    assert records[1]["name"] == "UK Data"
+    parsed_json = json.loads(captured.out)
+    assert len(parsed_json) == 2
+    assert parsed_json[0]["datasets"] == 250000
+
+    # 2. Test Markdown output
+    records_md = display_server_stats(format="markdown")
+    captured_md = capsys.readouterr()
+    assert len(records_md) == 2
+    assert (
+        "| Repository / Server | Country | Live Ver | Dataset Ver | "
+        "Datasets | Organizations | Formats | Latency | Status |" in captured_md.out
+    )
+    assert "|:---|:---:|:---:|:---:|---:|---:|:---:|:---:|:---|" in captured_md.out
+    assert "[US Data](https://data.gov)" in captured_md.out
+    assert "250,000" in captured_md.out
+    assert "300,000 total datasets indexed" in captured_md.out
+
+
+def test_is_format_supported_on_server() -> None:
+    from dartfx.ckan.harvester import is_format_supported_on_server
+
+    # Unknown server extensions -> returns True (runtime attempt)
+    assert is_format_supported_on_server("json", None) is True
+    assert is_format_supported_on_server("dcat", None) is True
+    assert is_format_supported_on_server("schemaorg", None) is True
+    assert is_format_supported_on_server("croissant", None) is True
+    assert is_format_supported_on_server("ddi", None) is True
+
+    # Server without extensions
+    no_dcat_exts = {"datastore", "datapusher", "resource_proxy"}
+    assert is_format_supported_on_server("json", no_dcat_exts) is True
+    assert is_format_supported_on_server("resources", no_dcat_exts) is True
+    assert is_format_supported_on_server("dcat", no_dcat_exts) is False
+    assert is_format_supported_on_server("jsonld", no_dcat_exts) is False
+    assert is_format_supported_on_server("ttl", no_dcat_exts) is False
+    assert is_format_supported_on_server("schemaorg", no_dcat_exts) is False
+    assert is_format_supported_on_server("croissant", no_dcat_exts) is False
+    assert is_format_supported_on_server("ddi", no_dcat_exts) is False
+
+    # Server with ckanext-dcat, croissant, and ddi
+    all_exts = {"ckanext-dcat", "croissant", "ddi_theme", "datastore"}
+    assert is_format_supported_on_server("json", all_exts) is True
+    assert is_format_supported_on_server("dcat", all_exts) is True
+    assert is_format_supported_on_server("jsonld", all_exts) is True
+    assert is_format_supported_on_server("ttl", all_exts) is True
+    assert is_format_supported_on_server("schemaorg", all_exts) is True
+    assert is_format_supported_on_server("croissant", all_exts) is True
+    assert is_format_supported_on_server("ddi", all_exts) is True
+
+
+def test_fetch_server_extensions_from_status_show(monkeypatch) -> None:
+    from dartfx.ckan.harvester import fetch_server_extensions
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"success": True, "result": {"extensions": ["ckanext-dcat", "stats"]}}
+
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: DummyResponse())
+
+    exts = fetch_server_extensions("mock.ckan.org")
+    assert exts == {"ckanext-dcat", "stats"}
+
+
+def test_server_harvester_skips_unsupported_formats(tmp_path: Path, monkeypatch) -> None:
+    from dartfx.ckan.harvester import ServerHarvester
+
+    harvester = ServerHarvester("mock.ckan.org", tmp_path)
+
+    # Server only has core extensions (no dcat)
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_extensions", lambda *_args, **_kwargs: {"datastore"})
+    monkeypatch.setattr(
+        "dartfx.ckan.harvester.fetch_active_datasets",
+        lambda *_args, **_kwargs: {"pkg-alpha": {"name": "pkg-alpha", "id": "id-alpha"}},
+    )
+
+    downloaded_formats = []
+
+    def mock_fetch_dataset_record(host, identifier, metadata_format="json", verbose=False, api_token=None):
+        del host, identifier, verbose, api_token
+        downloaded_formats.append(metadata_format)
+        return b"{}", f".{metadata_format}", None
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_dataset_record", mock_fetch_dataset_record)
+
+    # Request both json and dcat
+    stats = harvester.sync(limit=1, metadata_formats=["json", "dcat"])
+
+    # json was downloaded
+    assert "pkg-alpha::json" in stats["added"]
+    assert "json" in downloaded_formats
+
+    # dcat was skipped upfront without calling download or producing error
+    assert "pkg-alpha::dcat" not in stats["added"]
+    assert "dcat" not in downloaded_formats
+    assert len(stats["errors"]) == 0
+
+
+def test_normalize_formats_extended() -> None:
+    from dartfx.ckan.harvester import normalize_formats
+
+    res = normalize_formats("schemaorg,croissant,ddi")
+    assert "schemaorg" in res
+    assert "croissant" in res
+    assert "ddi" in res
+
+    res_alias = normalize_formats("schema.org,mlcroissant,ddi-xml")
+    assert "schemaorg" in res_alias
+    assert "croissant" in res_alias
+    assert "ddi" in res_alias
+
+
+def test_display_server_stats_format_capabilities_and_filtering(capsys, monkeypatch) -> None:
+    from dartfx.ckan.ckan import ServerInstallation
+    from dartfx.ckan.harvester import display_server_stats
+
+    inst1 = ServerInstallation(name="DCAT & Croissant Portal", hostname="dcat.croissant.org", country_code="US")
+    inst2 = ServerInstallation(name="Plain Portal", hostname="plain.org", country_code="CA")
+
+    def mock_fetch_server_stats(host, **_kwargs):
+        if "dcat" in host:
+            return {
+                "server": host,
+                "is_ckan": True,
+                "version": "2.10.1",
+                "datasets": 500,
+                "organizations": 10,
+                "has_dcat": True,
+                "has_schemaorg": True,
+                "has_croissant": True,
+                "has_ddi": False,
+                "extensions": ["dcat", "structured_data", "croissant"],
+            }
+        return {
+            "server": host,
+            "is_ckan": True,
+            "version": "2.9.0",
+            "datasets": 100,
+            "organizations": 2,
+            "has_dcat": False,
+            "has_schemaorg": False,
+            "has_croissant": False,
+            "has_ddi": False,
+            "extensions": [],
+        }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_stats", mock_fetch_server_stats)
+
+    # 1. Unfiltered table output includes Formats column and badges
+    capsys.readouterr()
+    wide_console = Console(width=200)
+    records = display_server_stats(installations=[inst1, inst2], format="table", console=wide_console)
+    captured = capsys.readouterr()
+    assert len(records) == 2
+    assert "Formats" in captured.out
+    assert "DCAT" in captured.out
+    assert "Schema" in captured.out
+    assert "Croissant" in captured.out
+    assert "Capabilities: 1 DCAT • 1 Schema.org • 1 Croissant • 0 DDI" in captured.out
+    assert records[0]["formats"] == ["dcat", "schemaorg", "croissant"]
+    assert records[0]["has_croissant"] is True
+    assert records[1]["formats"] == []
+
+    # 2. Filtered with croissant=True
+    records_croissant = display_server_stats(
+        installations=[inst1, inst2], croissant=True, format="table", console=wide_console
+    )
+    assert len(records_croissant) == 1
+    assert records_croissant[0]["hostname"] == "dcat.croissant.org"
+
+
+def test_fetch_dataset_record_schemaorg_and_croissant(monkeypatch) -> None:
+    from dartfx.ckan.harvester import fetch_dataset_record
+
+    class MockResp:
+        def __init__(self, status_code, content):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
+
+        def json(self):
+            return json.loads(self.content.decode("utf-8"))
+
+    def mock_get(url, **_kwargs):
+        if "croissant.jsonld" in url:
+            return MockResp(200, b'{"@context": "croissant", "title": "ML Data"}')
+        if "profiles=schemaorg" in url:
+            return MockResp(200, b'{"@context": "https://schema.org", "@type": "Dataset"}')
+        return MockResp(404, b"Not found")
+
+    monkeypatch.setattr("requests.get", mock_get)
+
+    cr_bytes, cr_ext, cr_err = fetch_dataset_record("demo.ckan.org", "sample-dataset", metadata_format="croissant")
+    assert cr_err is None
+    assert cr_ext == ".croissant.jsonld"
+    assert cr_bytes is not None
+    assert b"croissant" in cr_bytes
+
+    so_bytes, so_ext, so_err = fetch_dataset_record("demo.ckan.org", "sample-dataset", metadata_format="schemaorg")
+    assert so_err is None
+    assert so_ext == ".schemaorg.jsonld"
+    assert so_bytes is not None
+    assert b"schema.org" in so_bytes
+
+
+def test_probe_ckan_url_transient_retry_and_post_fallback(monkeypatch) -> None:
+    from dartfx.ckan.harvester import _probe_ckan_url
+
+    attempts = {"status": 0, "search": 0, "org": 0}
+
+    class MockResp:
+        def __init__(self, status_code: int, data: dict | None = None, text: str = ""):
+            self.status_code = status_code
+            self._data = data or {}
+            self.text = text or json.dumps(self._data)
+
+        def json(self):
+            return self._data
+
+    def mock_get(url, **_kwargs):
+        if "status_show" in url:
+            attempts["status"] += 1
+            # First attempt fails with 503 (e.g. concurrency limit), second succeeds
+            if attempts["status"] == 1:
+                return MockResp(503, text="Temporarily unavailable")
+            return MockResp(
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "ckan_version": "2.11.6",
+                        "site_title": "Test CKAN",
+                        "extensions": ["dcat", "harvest"],
+                    },
+                },
+            )
+        elif "package_search" in url:
+            attempts["search"] += 1
+            if attempts["search"] == 1:
+                return MockResp(503, text="Temporarily unavailable")
+            return MockResp(200, {"success": True, "result": {"count": 150}})
+        elif "organization_list" in url:
+            attempts["org"] += 1
+            # GET returns 400 Bad Request requiring POST
+            return MockResp(400, text="Bad request - JSON Error: Invalid request. Please use POST method")
+        return MockResp(404)
+
+    def mock_post(url, **_kwargs):
+        if "organization_list" in url:
+            return MockResp(200, {"success": True, "result": ["org1", "org2", "org3"]})
+        return MockResp(404)
+
+    monkeypatch.setattr("requests.get", mock_get)
+    monkeypatch.setattr("requests.post", mock_post)
+
+    res = _probe_ckan_url("https://test.ckan.org", "test.ckan.org", {}, timeout=5)
+    assert res["is_ckan"] is True
+    assert res["version"] == "2.11.6"
+    assert res["datasets"] == 150
+    assert res["organizations"] == 3
+    assert res["has_dcat"] is True
+    assert res["error"] is None
+
+
+def test_probe_ckan_url_status_code_error_classification(monkeypatch) -> None:
+    from dartfx.ckan.harvester import _probe_ckan_url
+
+    class MockResp:
+        def __init__(self, status_code: int, text: str = ""):
+            self.status_code = status_code
+            self.text = text
+
+        def json(self):
+            return {}
+
+    # Test 503
+    monkeypatch.setattr("requests.get", lambda _url, **_kwargs: MockResp(503, text="Service Unavailable"))
+    res_503 = _probe_ckan_url("https://err.ckan.org", "err.ckan.org", {}, timeout=5)
+    assert res_503["is_ckan"] is False
+    assert res_503["error"] == "Service Unavailable (503)"
+    assert res_503["has_dcat"] is False
+
+    # Test 429
+    monkeypatch.setattr("requests.get", lambda _url, **_kwargs: MockResp(429, text="Too Many Requests"))
+    res_429 = _probe_ckan_url("https://err.ckan.org", "err.ckan.org", {}, timeout=5)
+    assert res_429["is_ckan"] is False
+    assert res_429["error"] == "Rate Limited (429)"
+
+
+def test_display_server_stats_offline_server_hides_formats(monkeypatch, capsys) -> None:
+    from rich.console import Console
+
+    from dartfx.ckan.ckan import ServerInstallation
+    from dartfx.ckan.harvester import display_server_stats
+
+    inst = ServerInstallation(
+        id="offline.ckan.org",
+        url="https://offline.ckan.org",
+        hostname="offline.ckan.org",
+        name="Offline CKAN",
+        country_code="BE",
+        version="2.11.4",
+        extensions='["dcat", "structured_data"]',
+    )
+
+    def mock_fetch_stats(*_args, **_kwargs):
+        return {
+            "server": "offline.ckan.org",
+            "is_ckan": False,
+            "error": "Service Unavailable (503)",
+            "datasets": 0,
+            "organizations": 0,
+            "version": None,
+            "has_dcat": False,
+            "has_schemaorg": False,
+            "has_croissant": False,
+            "has_ddi": False,
+        }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_server_stats", mock_fetch_stats)
+
+    console = Console(width=200)
+    records = display_server_stats(installations=[inst], format="table", console=console)
+    captured = capsys.readouterr()
+
+    # Formats should be empty for offline / non-ckan server
+    assert len(records) == 1
+    assert records[0]["has_dcat"] is False
+    assert records[0]["formats"] == []
+    # Table should show '-' for formats, not 'DCAT' or 'Schema'
+    assert "DCAT" not in captured.out
+    assert "Schema" not in captured.out

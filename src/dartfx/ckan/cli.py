@@ -24,7 +24,7 @@ load_dotenv(find_dotenv(usecwd=True))
 
 
 def _normalize_smart_dashes() -> None:
-    """Sanitize macOS smart dashes (en-dash, em-dash) in sys.argv to standard hyphens."""
+    """Sanitize macOS smart dashes and bare -o/--output flags in sys.argv."""
     normalized: list[str] = []
     for arg in sys.argv:
         if any(arg.startswith(prefix) for prefix in ("-–", "—", "–", "−")):
@@ -34,7 +34,25 @@ def _normalize_smart_dashes() -> None:
             normalized.append(clean)
         else:
             normalized.append(arg)
-    sys.argv[:] = normalized
+
+    final_args: list[str] = []
+    i = 0
+    while i < len(normalized):
+        arg = normalized[i]
+        if arg in ("-o", "--output"):
+            if i + 1 < len(normalized) and not (normalized[i + 1].startswith("-") and normalized[i + 1] != "-"):
+                final_args.append(arg)
+                final_args.append(normalized[i + 1])
+                i += 2
+                continue
+            else:
+                final_args.append("--output=AUTO")
+                i += 1
+                continue
+        final_args.append(arg)
+        i += 1
+
+    sys.argv[:] = final_args
 
 
 _normalize_smart_dashes()
@@ -51,6 +69,8 @@ class OutputFormat(StrEnum):
     TABLE = "table"
     JSON = "json"
     CSV = "csv"
+    MARKDOWN = "markdown"
+    MD = "md"
 
 
 def get_server(hostname: str | None = None, api_key: str | None = None) -> CKANServer:
@@ -59,8 +79,9 @@ def get_server(hostname: str | None = None, api_key: str | None = None) -> CKANS
     return CKANServer(server=resolved_host, api_key=api_key)
 
 
-@app.command()
-def installations(
+@app.command(name="list")
+@app.command(name="installations", help="Alias for 'list'. List worldwide CKAN installations.")
+def list_installations(
     country: Annotated[
         str | None,
         typer.Option(
@@ -88,6 +109,24 @@ def installations(
 
     if format == OutputFormat.JSON:
         console.print_json(json.dumps([inst.model_dump(exclude_none=True) for inst in all_installations]))
+        return
+
+    if format in (OutputFormat.MARKDOWN, OutputFormat.MD):
+        md_lines = [
+            "| Repository / Organization | Hostname | Country | Code | Ver | Datasets |",
+            "|:---|:---|:---|:---:|:---:|---:|",
+        ]
+        for inst in all_installations:
+            name_val = (inst.name or "").replace("|", "\\|")
+            host_val = inst.clean_hostname or ""
+            url_val = inst.url
+            host_link = f"[{host_val}]({url_val})" if url_val else host_val
+            c_name = inst.country or "-"
+            c_code = inst.country_code or "-"
+            ver_str = inst.version or "-"
+            ds_str = f"{inst.dataset_count:,}" if inst.dataset_count is not None else "-"
+            md_lines.append(f"| {name_val} | {host_link} | {c_name} | {c_code} | {ver_str} | {ds_str} |")
+        print("\n".join(md_lines))
         return
 
     if format == OutputFormat.CSV:
@@ -131,6 +170,10 @@ def installations(
         )
 
     console.print(table)
+
+
+# Backward compatibility alias
+installations = list_installations
 
 
 @app.command()
@@ -215,6 +258,48 @@ def info(
     if exts:
         ext_str = ", ".join(exts) if isinstance(exts, list) else str(exts)
         console.print(f"[bold cyan]Extensions:[/] {ext_str}")
+
+    if (
+        getattr(server_client, "ssl_verify", None)
+        and isinstance(server_client.ssl_verify, str)
+        and "ca_bundles" in server_client.ssl_verify
+    ):
+        console.print("[cyan]Protocol Status:[/] Online (HTTPS via AIA Intermediate CA Chasing)")
+        console.print(
+            "[dim cyan]Certificate Chain:[/] Repaired: Missing intermediate CA "
+            "fetched via Authority Information Access (AIA)."
+        )
+
+    try:
+        formats_resp = server_client.get_info_export_formats()
+        formats_data = formats_resp.get("data", formats_resp) if isinstance(formats_resp, dict) else {}
+    except Exception:
+        formats_data = {}
+
+    if formats_data:
+        table = Table(
+            title=f"\nMetadata Export Formats for {resolved_host}",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("ID", style="cyan")
+        table.add_column("Display Name", style="white")
+        table.add_column("Media Type", style="yellow")
+        table.add_column("Required Extension", style="dim")
+        table.add_column("Harvest", justify="center")
+
+        for fid, finfo in formats_data.items():
+            req = finfo.get("requiredExtension") or "Core CKAN"
+            harvestable = finfo.get("isHarvestable")
+            table.add_row(
+                fid,
+                finfo.get("displayName", "N/A"),
+                finfo.get("mediaType", "N/A"),
+                req,
+                "[green]Yes[/]" if harvestable else "[red]No[/]",
+            )
+
+        console.print(table)
 
 
 @app.command()
@@ -400,7 +485,10 @@ def organizations(
 # ---------------------------------------------------------------------------
 app.command(
     name="harvest",
-    help="Harvest and incrementally sync CKAN metadata records into local storage.",
+    help=(
+        "Harvest and incrementally sync CKAN dataset metadata records into local storage "
+        "(applies strictly to metadata, not data payload files)."
+    ),
 )(_harvest_cmd)
 
 
@@ -488,9 +576,103 @@ def stats(
             help="Repository storage root directory (defaults to CKAN_REPOSITORY_ROOT or .cache).",
         ),
     ] = None,
+    sort: Annotated[
+        str,
+        typer.Option(
+            "--sort",
+            help="Sort results by column: name, datasets, country, latency, organizations, status.",
+        ),
+    ] = "name",
+    desc: Annotated[
+        bool,
+        typer.Option(
+            "--desc",
+            help="Force descending sort order.",
+        ),
+    ] = False,
+    asc: Annotated[
+        bool,
+        typer.Option(
+            "--asc",
+            help="Force ascending sort order.",
+        ),
+    ] = False,
+    format: Annotated[
+        OutputFormat,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Output format: table (default), json, markdown, or csv.",
+        ),
+    ] = OutputFormat.TABLE,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output results as JSON (shorthand for --format json).",
+        ),
+    ] = False,
+    markdown_output: Annotated[
+        bool,
+        typer.Option(
+            "--markdown",
+            "--md",
+            help="Output results as Markdown table (shorthand for --format markdown).",
+        ),
+    ] = False,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write output to a file instead of console (default: dartfx-ckan.stats.txt|json|md|csv).",
+        ),
+    ] = None,
+    dcat: Annotated[
+        bool,
+        typer.Option(
+            "--dcat",
+            help="Filter servers supporting DCAT metadata (ckanext-dcat).",
+        ),
+    ] = False,
+    schemaorg: Annotated[
+        bool,
+        typer.Option(
+            "--schemaorg",
+            "--schema",
+            help="Filter servers supporting Schema.org Dataset JSON-LD.",
+        ),
+    ] = False,
+    croissant: Annotated[
+        bool,
+        typer.Option(
+            "--croissant",
+            help="Filter servers supporting MLCommons Croissant metadata.",
+        ),
+    ] = False,
+    ddi: Annotated[
+        bool,
+        typer.Option(
+            "--ddi",
+            help="Filter servers supporting DDI XML microdata metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Display live dataset and organization counts for CKAN servers."""
     from dartfx.ckan.harvester import display_server_stats
+
+    descending: bool | None = None
+    if asc:
+        descending = False
+    elif desc:
+        descending = True
+
+    if json_output:
+        effective_format = OutputFormat.JSON
+    elif markdown_output:
+        effective_format = OutputFormat.MARKDOWN
+    else:
+        effective_format = format
 
     display_server_stats(
         server=server,
@@ -502,6 +684,14 @@ def stats(
         timeout=timeout,
         workers=workers,
         repo_root=Path(repo_dir) if repo_dir else None,
+        sort_by=sort,
+        descending=descending,
+        format=effective_format.value,
+        output=output,
+        dcat=dcat,
+        schemaorg=schemaorg,
+        croissant=croissant,
+        ddi=ddi,
     )
 
 

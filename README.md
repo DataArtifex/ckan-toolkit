@@ -113,16 +113,22 @@ dartfx-ckan stats --country CA --workers 12
 Incrementally harvest and synchronize datasets into structured local storage with concurrent multi-threading:
 
 ```bash
-# Harvest datasets from a single server with 8 worker threads
-dartfx-ckan harvest --server demo.ckan.org --limit 50 --workers 8 --repo-dir ./data
+# Harvest datasets from a single server into ./data with 8 worker threads
+dartfx-ckan harvest ./data --server demo.ckan.org --limit 50 --workers 8
+
+# Harvest a single specific dataset/package by name or ID
+dartfx-ckan harvest ./data --server demo.ckan.org --package sample-dataset --format json
 
 # Harvest multiple formats simultaneously (JSON, DCAT, Resources)
 dartfx-ckan harvest --server demo.ckan.org --format json,dcat,resources --workers 4
 
 # Harvest with keyword filter and date filter
-dartfx-ckan harvest --server demo.ckan.org --query "environment" --since 2024-01-01
+dartfx-ckan harvest ./data --server demo.ckan.org --query "environment" --since 2024-01-01
 
-# Dry-run mode
+# Force re-download and SHA-256 verification of all records
+dartfx-ckan harvest ./data --server demo.ckan.org --verify-sha256
+
+# Dry-run mode preview
 dartfx-ckan harvest --server demo.ckan.org --dry-run
 ```
 
