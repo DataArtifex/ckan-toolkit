@@ -2,6 +2,7 @@
 
 ## [0.2.0]
 
+- Fixed `tests/conftest.py` test suite execution in clean environments (such as CI runners without `click`) by safely guarding `click.testing` buffer workaround imports behind `try...except ImportError`.
 - Fixed server probe false negatives on rate-limited servers (such as `transportdata.be`) by adding automatic sequential retry for transient HTTP 503/429 concurrency bursts and POST method fallback for `organization_list` endpoints requiring POST.
 - Fixed HTTP error classification in `_probe_ckan_url` so 5xx and 429 response codes are properly identified as `Service Unavailable (503)`, `Rate Limited (429)`, or `Bad Gateway (502)` instead of defaulting to `Not CKAN Server`.
 - Fixed format capability reporting consistency in `stats` table and exports so capability badges and format arrays are strictly gated behind verified active CKAN servers (`is_ckan`), preventing contradictory format displays for inactive or offline hosts.
