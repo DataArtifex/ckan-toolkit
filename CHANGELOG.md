@@ -2,6 +2,12 @@
 
 ## [0.2.0]
 
+- **Machine-Actionable Standardized JSON Output & CLI Parity**:
+  - Added `--json`, `--markdown`/`--md`, and `-o`/`--output` support to `dartfx-ckan list` and `installations`.
+  - Standardized `installations`/`list` JSON schema (`platform="ckan"`, `hostname`, `url`, `country`, `country_code`).
+  - Added standard `platform: "ckan"` and `version` properties to `stats` JSON records.
+  - Standardized `harvest` JSON envelope (`--json`, `-o`/`--output`), emitting structured status, duration, summary counts (`datasets`, `added`, `updated`, `deleted`, `unchanged`, `errors`), server breakdowns, and error manifests with progress and banners silenced under `--json`.
+  - Added `--json` flag to `errors` command for pipeline introspection.
 - Fixed `tests/conftest.py` test suite execution in clean environments (such as CI runners without `click`) by safely guarding `click.testing` buffer workaround imports behind `try...except ImportError`.
 - Fixed server probe false negatives on rate-limited servers (such as `transportdata.be`) by adding automatic sequential retry for transient HTTP 503/429 concurrency bursts and POST method fallback for `organization_list` endpoints requiring POST.
 - Fixed HTTP error classification in `_probe_ckan_url` so 5xx and 429 response codes are properly identified as `Service Unavailable (503)`, `Rate Limited (429)`, or `Bad Gateway (502)` instead of defaulting to `Not CKAN Server`.

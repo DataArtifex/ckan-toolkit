@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -135,3 +136,61 @@ def test_cli_stats_command_flags() -> None:
     assert "--dcat" in clean_output
     assert "--schemaorg" in clean_output
     assert "--ddi" in clean_output
+
+
+def test_cli_list_json_standardized_and_file(tmp_path: Path, monkeypatch) -> None:
+    mock_insts = [
+        ServerInstallation(name="CKAN 1", hostname="ckan1.test", country="United States"),
+    ]
+    monkeypatch.setattr("dartfx.ckan.cli.fetch_ckan_installations", lambda **_kwargs: mock_insts)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["list", "--json"])
+    assert res.exit_code == 0
+    data = json.loads(res.stdout)
+    assert len(data) == 1
+    assert data[0]["platform"] == "ckan"
+    assert data[0]["hostname"] == "ckan1.test"
+    assert data[0]["url"] == "https://ckan1.test"
+
+    # Test file output
+    out_file = tmp_path / "ckan_insts.json"
+    res_file = runner.invoke(app, ["list", "--json", "-o", str(out_file)])
+    assert res_file.exit_code == 0
+    assert out_file.exists()
+    saved = json.loads(out_file.read_text(encoding="utf-8"))
+    assert saved[0]["platform"] == "ckan"
+
+
+def test_cli_harvest_json_output(tmp_path: Path, monkeypatch) -> None:
+    mock_inst = [ServerInstallation(name="Mock CKAN", hostname="mock.ckan.org", country="Global")]
+    monkeypatch.setattr("dartfx.ckan.harvester.fetch_ckan_installations", lambda **_kwargs: mock_inst)
+
+    class MockHarvester:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def sync(self, **_kwargs):
+            return {
+                "datasets": ["ds-1"],
+                "added": ["ds-1"],
+                "updated": [],
+                "deleted": [],
+                "unchanged": [],
+                "errors": [],
+            }
+
+    monkeypatch.setattr("dartfx.ckan.harvester.ServerHarvester", MockHarvester)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["harvest", str(tmp_path), "--formats", "json", "--json"])
+    assert res.exit_code == 0
+    harvest_json = json.loads(res.stdout)
+    assert harvest_json["platform"] == "ckan"
+    assert harvest_json["status"] == "success"
+    assert harvest_json["summary"]["datasets"] == 1
+    assert harvest_json["summary"]["added"] == 1
+    assert harvest_json["summary"]["errors"] == 0
+    assert len(harvest_json["servers"]) == 1
+    assert harvest_json["servers"][0]["hostname"] == "mock.ckan.org"
+    assert harvest_json["parameters"]["formats"] == ["json"]

@@ -99,6 +99,29 @@ def list_installations(
         ),
     ] = None,
     format: Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format")] = OutputFormat.TABLE,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output results as JSON (shorthand for --format json).",
+        ),
+    ] = False,
+    markdown_output: Annotated[
+        bool,
+        typer.Option(
+            "--markdown",
+            "--md",
+            help="Output results as Markdown table (shorthand for --format markdown).",
+        ),
+    ] = False,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write output to a file instead of console (default: dartfx-ckan.installations.txt|json|md|csv).",
+        ),
+    ] = None,
     limit: Annotated[int | None, typer.Option("--limit", "-l", help="Limit number of results")] = None,
 ) -> None:
     """List worldwide CKAN installations."""
@@ -107,11 +130,48 @@ def list_installations(
     if limit:
         all_installations = all_installations[:limit]
 
-    if format == OutputFormat.JSON:
-        console.print_json(json.dumps([inst.model_dump(exclude_none=True) for inst in all_installations]))
+    if json_output:
+        effective_format = OutputFormat.JSON
+    elif markdown_output:
+        effective_format = OutputFormat.MARKDOWN
+    else:
+        effective_format = format
+
+    serialized_installations: list[dict[str, Any]] = []
+    for inst in all_installations:
+        data = inst.model_dump(exclude_none=True)
+        data["platform"] = "ckan"
+        data["hostname"] = inst.clean_hostname or inst.hostname
+        data["url"] = inst.url
+        serialized_installations.append(data)
+
+    out_path: Path | None = None
+    if output:
+        out_str = str(output).strip()
+        if out_str.lower() in ("auto", "__auto__", "-"):
+            ext_map = {
+                OutputFormat.JSON: "json",
+                OutputFormat.MARKDOWN: "md",
+                OutputFormat.MD: "md",
+                OutputFormat.CSV: "csv",
+                OutputFormat.TABLE: "txt",
+            }
+            ext = ext_map.get(effective_format, "txt")
+            out_path = Path(f"dartfx-ckan.installations.{ext}")
+        else:
+            out_path = Path(out_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if effective_format == OutputFormat.JSON:
+        json_str = json.dumps(serialized_installations, indent=2, default=str)
+        if out_path:
+            out_path.write_text(json_str + "\n", encoding="utf-8")
+            console.print(f"[bold green]✓ Installations saved to:[/] {out_path}")
+        else:
+            console.print_json(json_str)
         return
 
-    if format in (OutputFormat.MARKDOWN, OutputFormat.MD):
+    if effective_format in (OutputFormat.MARKDOWN, OutputFormat.MD):
         md_lines = [
             "| Repository / Organization | Hostname | Country | Code | Ver | Datasets |",
             "|:---|:---|:---|:---:|:---:|---:|",
@@ -126,12 +186,20 @@ def list_installations(
             ver_str = inst.version or "-"
             ds_str = f"{inst.dataset_count:,}" if inst.dataset_count is not None else "-"
             md_lines.append(f"| {name_val} | {host_link} | {c_name} | {c_code} | {ver_str} | {ds_str} |")
-        print("\n".join(md_lines))
+        md_text = "\n".join(md_lines) + "\n"
+        if out_path:
+            out_path.write_text(md_text, encoding="utf-8")
+            console.print(f"[bold green]✓ Installations saved to:[/] {out_path}")
+        else:
+            print(md_text, end="")
         return
 
-    if format == OutputFormat.CSV:
+    if effective_format == OutputFormat.CSV:
+        from io import StringIO
+
+        buf = StringIO()
         writer = csv.DictWriter(
-            sys.stdout,
+            buf,
             fieldnames=["name", "hostname", "country", "country_code", "version", "datasets"],
         )
         writer.writeheader()
@@ -146,6 +214,12 @@ def list_installations(
                     "datasets": inst.dataset_count if inst.dataset_count is not None else "",
                 }
             )
+        csv_text = buf.getvalue()
+        if out_path:
+            out_path.write_text(csv_text, encoding="utf-8")
+            console.print(f"[bold green]✓ Installations saved to:[/] {out_path}")
+        else:
+            sys.stdout.write(csv_text)
         return
 
     table = Table(title=f"Worldwide CKAN Installations ({len(all_installations)} found)")
@@ -169,7 +243,15 @@ def list_installations(
             ds_count,
         )
 
-    console.print(table)
+    if out_path:
+        from rich.console import Console as FileConsole
+
+        fc = FileConsole(record=True, width=120)
+        fc.print(table)
+        out_path.write_text(fc.export_text(), encoding="utf-8")
+        console.print(f"[bold green]✓ Installations saved to:[/] {out_path}")
+    else:
+        console.print(table)
 
 
 # Backward compatibility alias
@@ -726,6 +808,13 @@ def errors(
             help="Output format: table (default), json, or csv.",
         ),
     ] = OutputFormat.TABLE,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output results as JSON (shorthand for --format json).",
+        ),
+    ] = False,
     by_format: Annotated[
         bool,
         typer.Option(
@@ -754,7 +843,8 @@ def errors(
 
     analysis = analyze_harvest_errors(repo_dir=repo_dir, server=server)
 
-    if format == OutputFormat.JSON:
+    effective_format = OutputFormat.JSON if json_output else format
+    if effective_format == OutputFormat.JSON:
         console.print_json(json.dumps(analysis, indent=2))
         return
 

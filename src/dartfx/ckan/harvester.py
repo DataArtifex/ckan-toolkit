@@ -1993,11 +1993,13 @@ def display_server_stats(
         )
 
         record: dict[str, Any] = {
+            "platform": "ckan",
             "name": inst.name or inst.clean_hostname,
             "url": inst.url,
             "hostname": inst.clean_hostname,
             "country": inst.country,
             "country_code": inst.country_code,
+            "version": live_v if live_v != "-" else (cat_v if cat_v != "-" else None),
             "live_version": live_v if live_v != "-" else None,
             "dataset_version": cat_v if cat_v != "-" else None,
             "datasets": datasets_int,
@@ -2997,8 +2999,24 @@ def harvest(
             help="Path to write execution activity log (default: harvester-YYYYMMDD-HHMMSS.log in repo directory).",
         ),
     ] = None,
-) -> None:
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output harvest execution results and summary as JSON.",
+        ),
+    ] = False,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write harvest execution summary to file instead of console (default: dartfx-ckan.harvest.json).",
+        ),
+    ] = None,
+) -> dict[str, Any]:
     """Harvest and incrementally sync CKAN metadata records across servers into local directory structures."""
+    start_time = time.time()
     target_repo = output_dir or (Path(repo_dir) if repo_dir else None)
     if not target_repo:
         env_repo = (
@@ -3047,12 +3065,13 @@ def harvest(
     file_logger.log(f"Verbose Logging: {verbose}")
     file_logger.log("================================================================================")
 
-    console.print(
-        Panel.fit(
-            "[bold green]CKAN Metadata Harvester & Sync CLI[/bold green]",
-            border_style="cyan",
+    if not json_output:
+        console.print(
+            Panel.fit(
+                "[bold green]CKAN Metadata Harvester & Sync CLI[/bold green]",
+                border_style="cyan",
+            )
         )
-    )
 
     config_table = Table(show_header=False, box=None)
     config_table.add_column("Key", style="bold cyan")
@@ -3077,8 +3096,9 @@ def harvest(
     config_table.add_row("Dry Run Mode", str(dry_run))
     config_table.add_row("Verbose Logging", str(verbose))
 
-    console.print(config_table)
-    console.print()
+    if not json_output:
+        console.print(config_table)
+        console.print()
 
     installations = fetch_ckan_installations(
         target_server=None if server.upper() == "ALL" else server,
@@ -3087,15 +3107,55 @@ def harvest(
     )
 
     if not installations:
+        if json_output:
+            empty_result: dict[str, Any] = {
+                "platform": "ckan",
+                "status": "failed",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "duration_seconds": round(time.time() - start_time, 2),
+                "dry_run": dry_run,
+                "summary": {"datasets": 0, "added": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": 1},
+                "servers": [],
+                "errors": [
+                    {
+                        "server": server,
+                        "pid": "-",
+                        "url": None,
+                        "format": "-",
+                        "error_type": "NoServersFound",
+                        "reason": f"No CKAN servers found matching filter '{server}'.",
+                    }
+                ],
+                "parameters": {
+                    "server": server,
+                    "country": country,
+                    "package": package,
+                    "since": since,
+                    "query": query,
+                    "formats": parsed_formats,
+                    "limit": limit,
+                },
+            }
+            if output:
+                out_str = str(output).strip()
+                out_p = Path("dartfx-ckan.harvest.json" if out_str.lower() in ("auto", "__auto__", "-") else out_str)
+                out_p.parent.mkdir(parents=True, exist_ok=True)
+                out_p.write_text(json.dumps(empty_result, indent=2, default=str) + "\n", encoding="utf-8")
+            else:
+                console.print_json(json.dumps(empty_result, default=str))
+            raise typer.Exit(code=1)
+
         console.print(f"[bold red]No CKAN servers found matching filter '{server}'.[/bold red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold green]Found {len(installations)} CKAN server(s) matching criteria.[/bold green]\n")
+    if not json_output:
+        console.print(f"[bold green]Found {len(installations)} CKAN server(s) matching criteria.[/bold green]\n")
 
     overall_stats = {"datasets": 0, "added": 0, "updated": 0, "deleted": 0, "unchanged": 0, "errors": 0}
     summary_rows = []
     all_errors: list[dict[str, Any]] = []
 
+    progress_console = Console(quiet=True) if json_output else console
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -3103,7 +3163,7 @@ def harvest(
         TaskProgressColumn(),
         MofNCompleteColumn(),
         TimeRemainingColumn(),
-        console=console,
+        console=progress_console,
         redirect_stdout=False,
         redirect_stderr=False,
     )
@@ -3206,6 +3266,99 @@ def harvest(
             progress.update(dataset_task, completed=max(1, total_cnt), visible=False)
             progress.advance(server_task)
 
+    duration_sec = round(time.time() - start_time, 2)
+    has_successes = (overall_stats["added"] + overall_stats["updated"] + overall_stats["unchanged"]) > 0
+    if overall_stats["errors"] == 0:
+        overall_status = "success"
+    elif has_successes:
+        overall_status = "partial_success"
+    else:
+        overall_status = "failed"
+
+    servers_list: list[dict[str, Any]] = []
+    for host_name, country_val, datasets_cnt, added, updated, unchanged, deleted, errors in summary_rows:
+        server_url = f"https://{host_name}" if not host_name.startswith("http") else host_name
+        servers_list.append(
+            {
+                "hostname": host_name,
+                "url": server_url,
+                "country": country_val or "Global",
+                "datasets": datasets_cnt,
+                "added": added,
+                "updated": updated,
+                "unchanged": unchanged,
+                "deleted": deleted,
+                "errors": errors,
+            }
+        )
+
+    errors_list: list[dict[str, Any]] = []
+    for err in all_errors:
+        if isinstance(err, dict):
+            pid_raw = err.get("pid") or err.get("key", "Unknown")
+            fmt_display = err.get("format", "-")
+            reason_display = err.get("reason", "Unknown error")
+            err_server = err.get("server") or (pid_raw.split(" (")[0] if " (" in str(pid_raw) else None)
+            dataset_url = str(err.get("url")) if err.get("url") else format_dataset_url(pid_raw, host=err_server)
+        else:
+            pid_raw = str(err)
+            fmt_display = "-"
+            reason_display = "Error occurred"
+            err_server = None
+            dataset_url = format_dataset_url(pid_raw)
+
+        errors_list.append(
+            {
+                "server": err_server,
+                "pid": pid_raw,
+                "url": dataset_url,
+                "format": fmt_display,
+                "error_type": classify_harvest_error(reason_display),
+                "reason": reason_display,
+            }
+        )
+
+    harvest_result: dict[str, Any] = {
+        "platform": "ckan",
+        "status": overall_status,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "duration_seconds": duration_sec,
+        "dry_run": dry_run,
+        "summary": {
+            "datasets": overall_stats["datasets"],
+            "added": overall_stats["added"],
+            "updated": overall_stats["updated"],
+            "unchanged": overall_stats["unchanged"],
+            "deleted": overall_stats["deleted"],
+            "errors": overall_stats["errors"],
+        },
+        "servers": servers_list,
+        "errors": errors_list,
+        "parameters": {
+            "server": server,
+            "country": country,
+            "package": package,
+            "since": since,
+            "query": query,
+            "formats": parsed_formats,
+            "limit": limit,
+        },
+    }
+
+    if output:
+        out_str = str(output).strip()
+        out_path = Path("dartfx-ckan.harvest.json" if out_str.lower() in ("auto", "__auto__", "-") else out_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(harvest_result, indent=2, default=str) + "\n", encoding="utf-8")
+        if not json_output:
+            console.print(f"[bold green]✓ Harvest summary saved to:[/] {out_path}")
+
+    if json_output:
+        if not output:
+            console.print_json(json.dumps(harvest_result, default=str))
+        file_logger.log("Harvesting process completed.")
+        return harvest_result
+
     # Render summary table
     console.print("\n[bold green]================ Sync Summary Report ================[/bold green]\n")
     results_table = Table(show_header=True, header_style="bold magenta")
@@ -3219,9 +3372,9 @@ def harvest(
     results_table.add_column("Errors (!)", style="bold red", justify="right")
 
     file_logger.log("================ Sync Summary Report ================")
-    for host, country_val, datasets_cnt, added, updated, unchanged, deleted, errors in summary_rows:
-        server_url = f"https://{host}" if not host.startswith("http") else host
-        clickable_host = f"[link={server_url}]{host}[/link]"
+    for host_name, country_val, datasets_cnt, added, updated, unchanged, deleted, errors in summary_rows:
+        server_url = f"https://{host_name}" if not host_name.startswith("http") else host_name
+        clickable_host = f"[link={server_url}]{host_name}[/link]"
         results_table.add_row(
             clickable_host,
             country_val or "Global",
@@ -3233,7 +3386,7 @@ def harvest(
             str(errors),
         )
         file_logger.log(
-            f"Server: {host} ({country_val or 'Global'}) | Datasets: {datasets_cnt} | Files Added: {added} | "
+            f"Server: {host_name} ({country_val or 'Global'}) | Datasets: {datasets_cnt} | Files Added: {added} | "
             f"Files Updated: {updated} | Files Unchanged: {unchanged} | Files Deleted: {deleted} | Errors: {errors}"
         )
 
@@ -3328,6 +3481,7 @@ def harvest(
         )
 
     file_logger.log("Harvesting process completed.")
+    return harvest_result
 
 
 if __name__ == "__main__":
